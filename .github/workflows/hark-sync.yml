@@ -1,0 +1,89 @@
+name: Hark 同步
+
+# 每 6 小时（或手动）：
+#   1. 合并官方 Wei-Shaw/sub2api 的 main；有冲突就开 issue，不推送。
+#   2. 把 GOXF/hark2api 最新的 gateway 拷进 backend/internal/pkg/harkembed/gateway。
+#   3. 跑 Hark 相关测试，通过才推送，并重建镜像。
+# 读私有库 hark2api 需要仓库机密 HARK2API_TOKEN（只读 contents 的 PAT）。
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [hark2api-updated]
+
+permissions:
+  contents: write
+  issues: write
+  packages: write
+
+concurrency:
+  group: hark-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.push.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: GOXF/hark2api
+          token: ${{ secrets.HARK2API_TOKEN }}
+          path: .hark2api
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: 合并官方 sub2api
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Wei-Shaw/sub2api.git
+          git fetch --no-tags upstream main
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort
+            echo "conflict=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+      - name: 冲突提醒
+        if: steps.merge.outputs.conflict == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="合并官方 sub2api 有冲突"
+          if [ -z "$(gh issue list --state open --search "$title in:title" --json number -q '.[].number')" ]; then
+            gh issue create --title "$title" --body "官方 main 与本仓库有冲突，需要手工合并。本次只同步 hark2api。"
+          fi
+      - name: 同步 hark2api
+        run: |
+          tools/sync-hark2api.sh .hark2api
+          rm -rf .hark2api
+          git add backend/internal/pkg/harkembed/gateway
+          git diff --cached --quiet || git commit -m "同步 hark2api $(cut -c1-7 backend/internal/pkg/harkembed/gateway/UPSTREAM_COMMIT)"
+      - name: 测试
+        working-directory: backend
+        run: |
+          go build ./...
+          go test ./internal/pkg/harkembed/ ./internal/domain/
+          go test -tags unit ./internal/service/ -run 'PlatformCatalog|ProviderProfile|Hark'
+      - name: 推送
+        id: push
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+          else
+            git push origin HEAD:main
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          fi
+  image:
+    needs: sync
+    if: needs.sync.outputs.changed == '1'
+    uses: ./.github/workflows/hark-image.yml
+    secrets: inherit

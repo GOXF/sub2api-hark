@@ -37,7 +37,10 @@ const (
 	PlatformCommandCode = "command_code"
 	// PlatformCline 是 Cline API（多模型聚合，OpenAI 兼容 Chat Completions；按量积分计费，
 	// 另有 ClinePass 订阅）。
-	PlatformCline     = "cline"
+	PlatformCline = "cline"
+	// PlatformHark 是 Hark（hark.com，网页登录 Cookie）：由进程内嵌的 hark2api 网关
+	// 转成 OpenAI Chat Completions / Responses（见 internal/pkg/harkembed）。
+	PlatformHark      = "hark"
 	PlatformComposite = "composite"
 )
 

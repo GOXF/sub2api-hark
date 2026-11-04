@@ -221,6 +221,20 @@ var providerProfiles = map[string]*ProviderProfile{
 			},
 		},
 	},
+	PlatformHark: {
+		Platform:         PlatformHark,
+		DefaultMode:      AccountModePayG,
+		DefaultTestModel: DefaultHarkTestModel,
+		// Hark 账号的 API Key 是网页登录 Cookie；请求由进程内 hark2api 处理（见 hark.go）。
+		Modes: map[string]ProviderEndpoints{
+			AccountModePayG: {
+				BaseURLs: map[string]string{
+					APIProtocolChatCompletions: DefaultHarkBaseURL,
+					APIProtocolResponses:       DefaultHarkBaseURL,
+				},
+			},
+		},
+	},
 }
 
 // LookupProviderProfile 返回 platform 对应的多协议供应商 profile；非此类平台返回 nil。

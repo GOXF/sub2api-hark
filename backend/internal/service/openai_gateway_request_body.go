@@ -31,6 +31,10 @@ func (s *OpenAIGatewayService) validateUpstreamBaseURL(raw string) (string, erro
 
 // validateOutboundURL 按 security.url_allowlist 策略校验网关主动连接的出站 URL。
 func (s *OpenAIGatewayService) validateOutboundURL(raw string) (string, error) {
+	if isHarkInternalURL(raw) {
+		// 进程内 Hark 网关，不出网（见 hark.go）。
+		return strings.TrimRight(strings.TrimSpace(raw), "/"), nil
+	}
 	if s.cfg == nil {
 		return urlvalidator.ValidateURLFormat(raw, false)
 	}

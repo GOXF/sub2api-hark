@@ -52,6 +52,7 @@ const (
 	PlatformTypeSafe    = domain.PlatformTypeSafe
 	PlatformCommandCode = domain.PlatformCommandCode
 	PlatformCline       = domain.PlatformCline
+	PlatformHark        = domain.PlatformHark
 	PlatformComposite   = domain.PlatformComposite
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
@@ -92,6 +93,8 @@ const (
 	DefaultCommandCodeBaseURL = "https://api.commandcode.ai/provider/v1"
 	// Cline API：只提供 Chat Completions（{base}/chat/completions）与模型列表。
 	DefaultClineBaseURL = "https://api.cline.bot/api/v1"
+	// DefaultHarkBaseURL 是进程内 Hark 网关（不出网，见 internal/pkg/harkembed）。
+	DefaultHarkBaseURL = "http://hark.internal/v1"
 )
 
 // 国产供应商 Anthropic 协议端点的默认 base_url（上游路径为 {base}/v1/messages）。
