@@ -17,6 +17,7 @@ import { platformQuotaPlatforms } from '@/api/admin/users'
 const concretePlatforms = [
   'anthropic',
   'openai',
+  'hark',
   'gemini',
   'antigravity',
   'grok',
@@ -27,8 +28,7 @@ const concretePlatforms = [
   'opencode_go',
   'typesafe',
   'command_code',
-  'cline',
-  'hark'
+  'cline'
 ]
 
 describe('platform option catalogs', () => {
@@ -64,8 +64,8 @@ describe('platform catalog with a newly registered platform', () => {
       'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe', 'command_code', 'cline', 'hark'
     ])
     expect(CONCRETE_PLATFORM_OPTIONS.map((option) => option.label)).toEqual([
-      'Anthropic', 'OpenAI', 'Gemini', 'Antigravity', 'Grok',
-      'Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax', 'OpenCode', 'TypeSafe / Jev', 'Command Code', 'Cline', 'Hark'
+      'Anthropic', 'OpenAI', 'Hark', 'Gemini', 'Antigravity', 'Grok',
+      'Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax', 'OpenCode', 'TypeSafe / Jev', 'Command Code', 'Cline'
     ])
     expect(platformLabel('zhipu')).toBe('Zhipu GLM')
     expect(platformLabel('composite')).toBe('Composite')

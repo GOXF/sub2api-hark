@@ -37,6 +37,7 @@ type PlatformSpec struct {
 var platformList = []PlatformSpec{
 	{ID: PlatformAnthropic, DisplayName: "Anthropic", Gateway: PlatformGatewayAnthropic, LiteLLMProvider: "anthropic"},
 	{ID: PlatformOpenAI, DisplayName: "OpenAI", Gateway: PlatformGatewayOpenAI, LiteLLMProvider: "openai"},
+	{ID: PlatformHark, DisplayName: "Hark", Gateway: PlatformGatewayOpenAI},
 	{ID: PlatformGemini, DisplayName: "Gemini", Gateway: PlatformGatewayGemini, LiteLLMProvider: "gemini"},
 	{ID: PlatformAntigravity, DisplayName: "Antigravity", Gateway: PlatformGatewayAntigravity, LiteLLMProvider: "anthropic"},
 	{ID: PlatformGrok, DisplayName: "Grok", Gateway: PlatformGatewayOpenAI, LiteLLMProvider: "xai"},
@@ -48,7 +49,6 @@ var platformList = []PlatformSpec{
 	{ID: PlatformTypeSafe, DisplayName: "TypeSafe / Jev", Gateway: PlatformGatewayAnthropic, LiteLLMProvider: "typesafe"},
 	{ID: PlatformCommandCode, DisplayName: "Command Code", Gateway: PlatformGatewayOpenAI},
 	{ID: PlatformCline, DisplayName: "Cline", Gateway: PlatformGatewayOpenAI},
-	{ID: PlatformHark, DisplayName: "Hark", Gateway: PlatformGatewayOpenAI},
 }
 
 var platformIndex = func() map[string]int {
@@ -105,6 +105,10 @@ func PlatformIDsWhere(match func(PlatformSpec) bool) []string {
 // compositePrecedenceHead 是组合分组查找顺序的固定前缀（历史顺序：Gemini 先于 OpenAI）。
 var compositePrecedenceHead = []string{PlatformAnthropic, PlatformGemini, PlatformOpenAI}
 
+// compositePrecedenceTail 是组合分组查找顺序的固定后缀：Hark 在展示顺序中紧随
+// OpenAI，但回退顺序保持其登记时的位置（末尾），不随展示顺序改变。
+var compositePrecedenceTail = []string{PlatformHark}
+
 // CompositePrecedencePlatformIDs 返回按平台依次回退时的顺序：组合分组在请求目标
 // 解析前逐平台查找定价 / 模型映射（先命中者生效）、拼接默认模型列表，以及调度快照
 // 遍历。沿用历史顺序 anthropic、gemini、openai，其余按展示顺序，新登记的平台追加在末尾。
@@ -117,9 +121,17 @@ func CompositePrecedencePlatformIDs() []string {
 			seen[id] = struct{}{}
 		}
 	}
+	for _, id := range compositePrecedenceTail {
+		seen[id] = struct{}{}
+	}
 	for _, spec := range platformList {
 		if _, ok := seen[spec.ID]; !ok {
 			out = append(out, spec.ID)
+		}
+	}
+	for _, id := range compositePrecedenceTail {
+		if IsConcretePlatform(id) {
+			out = append(out, id)
 		}
 	}
 	return out
