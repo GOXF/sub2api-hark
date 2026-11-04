@@ -55,7 +55,10 @@ func QueryUsage(ctx context.Context, apiKey, proxyURL string) (*Usage, error) {
 	if ua == "" {
 		ua = gateway.DefaultUserAgent
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	}
 	if p := strings.TrimSpace(proxyURL); p != "" {
 		u, err := url.Parse(p)
 		if err != nil {
