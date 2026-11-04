@@ -243,6 +243,9 @@ type UsageInfo struct {
 	// 错误码（机器可读）：forbidden / unauthenticated / rate_limited / network_error
 	ErrorCode string `json:"error_code,omitempty"`
 
+	// Hark 额度（/api/billing/summary：今日与本期计量）
+	Hark *HarkUsageInfo `json:"hark_usage,omitempty"`
+
 	// 获取 usage 时的错误信息（降级返回，而非 500）
 	Error string `json:"error,omitempty"`
 }
@@ -383,6 +386,10 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
 		return usage, err
+	}
+
+	if account.Platform == PlatformHark {
+		return s.getHarkUsage(ctx, account, forceProbe)
 	}
 
 	if account.Platform == PlatformGrok {

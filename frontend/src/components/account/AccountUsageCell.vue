@@ -438,6 +438,47 @@
 
     <!-- Multi-protocol API-key providers (CN vendors, OpenCode, Command Code):
          coding-plan / subscription quota windows or balance -->
+    <!-- Hark：Hark 账号额度（今日 / 本期计量），由后端用账号的 Cookie / UA / 代理查询 -->
+    <template v-else-if="account.platform === 'hark'">
+      <div v-if="loading" class="space-y-1.5">
+        <div class="flex items-center gap-1">
+          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-1.5 w-8 animate-pulse rounded-full bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+        </div>
+      </div>
+      <div v-else-if="error" class="text-xs text-red-500">
+        {{ error }}
+      </div>
+      <div v-else-if="usageInfo?.hark_usage" class="space-y-1" data-testid="hark-usage">
+        <UsageProgressBar
+          v-if="usageInfo.hark_usage.daily"
+          :label="t('admin.accounts.usageWindow.harkDaily')"
+          :utilization="usageInfo.hark_usage.daily.utilization"
+          :resets-at="usageInfo.hark_usage.daily.resets_at"
+          color="indigo"
+        />
+        <UsageProgressBar
+          v-if="usageInfo.hark_usage.pool"
+          :label="t('admin.accounts.usageWindow.harkPool')"
+          :utilization="usageInfo.hark_usage.pool.utilization"
+          :resets-at="usageInfo.hark_usage.pool.resets_at"
+          color="emerald"
+        />
+        <div v-if="harkUsageText" class="text-[10px] text-gray-500 dark:text-gray-400" :title="harkUsageText">
+          {{ harkUsageText }}
+        </div>
+      </div>
+      <div
+        v-else-if="usageInfo?.error"
+        class="truncate text-xs text-amber-600 dark:text-amber-400 max-w-[200px]"
+        :title="usageInfo.error"
+      >
+        {{ usageInfo.error }}
+      </div>
+      <div v-else class="text-xs text-gray-400">-</div>
+    </template>
+
     <template v-else-if="isMultiProtocolApiKeyPlatform(account.platform)">
       <!-- 挂在 CN 平台下的 Ollama Cloud 账号（资格由后端下发 eligible）：用量由
            Ollama 用量窗口负责。这类账号不是国产厂商订阅，CN 的额度/余额探测端点由
@@ -819,7 +860,17 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'openai') {
     return props.account.type === 'oauth'
   }
+  if (props.account.platform === 'hark') return true
   return false
+})
+
+const harkUsageText = computed(() => {
+  const hark = usageInfo.value?.hark_usage
+  if (!hark) return ''
+  const meter = (m?: { used: number; limit: number } | null) =>
+    m ? `${formatCompactNumber(m.used)}/${formatCompactNumber(m.limit)}` : '-'
+  const text = t('admin.accounts.usageWindow.harkUsed', { daily: meter(hark.daily), pool: meter(hark.pool) })
+  return hark.plan ? `${text} · ${hark.plan}` : text
 })
 
 // CN 供应商子单元格可见性（与 CNProviderQuotaCell / CNProviderBalanceCell 共用

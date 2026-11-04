@@ -407,6 +407,53 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).not.toContain('-')
   })
 
+  it('Hark 账号渲染今日与本期额度', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active',
+      updated_at: null,
+      five_hour: null,
+      seven_day: null,
+      seven_day_sonnet: null,
+      hark_usage: {
+        plan: 'Pro',
+        daily: { used: 250, limit: 1000, utilization: 25, resets_at: '2026-11-05T00:00:00Z', remaining_seconds: 60 },
+        pool: { used: 1, limit: 3, utilization: 33.33, resets_at: null, remaining_seconds: 0 }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9105,
+          platform: 'hark',
+          type: 'apikey',
+          credentials: { api_key: 'sid=x' }
+        })
+      },
+      global: {
+        stubs: {
+          ...cnUsageCellStubs,
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(getUsage).toHaveBeenCalledWith(9105)
+    const bars = wrapper.findAll('.usage-bar').map(bar => bar.text())
+    expect(bars).toEqual([
+      'admin.accounts.usageWindow.harkDaily|25|2026-11-05T00:00:00Z',
+      'admin.accounts.usageWindow.harkPool|33.33|'
+    ])
+    expect(wrapper.find('[data-test="cn-quota-cell"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.harkUsed · Pro')
+  })
+
   it('Antigravity 图片用量会聚合新旧 image 模型', async () => {
     getUsage.mockResolvedValue({
       antigravity_quota: {
