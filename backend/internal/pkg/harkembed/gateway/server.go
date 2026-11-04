@@ -55,6 +55,8 @@ type Account struct {
 	InFlight     int    `json:"in_flight"`
 	Bridge       bool   `json:"bridge"`
 	ProxyID      string `json:"proxy_id,omitempty"`
+	// Timezone 是该账号专用的 IANA 时区（如按代理出口自动适配）；空则用全局设置。
+	Timezone string `json:"timezone,omitempty"`
 }
 type Event struct {
 	Time   string `json:"time"`
@@ -623,9 +625,8 @@ func validSettings(v Settings) error {
 	if v.Timeout < 30 || v.Timeout > 600 {
 		return errors.New("超时需要在 30–600 秒之间")
 	}
-	allowed := map[string]bool{"Asia/Shanghai": true, "UTC": true, "Asia/Tokyo": true, "America/New_York": true, "Europe/London": true}
-	if !allowed[v.Timezone] {
-		return errors.New("请选择有效的时区")
+	if !ValidTimezone(v.Timezone) {
+		return errors.New("请填写有效的 IANA 时区，例如 America/Los_Angeles")
 	}
 	return nil
 }
@@ -635,6 +636,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.Name = strings.TrimSpace(v.Name)
+	v.Timezone = strings.TrimSpace(v.Timezone)
 	if err := validSettings(v); err != nil {
 		fail(w, 400, "invalid_settings", err.Error())
 		return
@@ -674,14 +676,19 @@ func (s *Server) authorized(r *http.Request) bool {
 }
 
 // requestAPIKey 客户端的 API Key：Authorization: Bearer；Anthropic 接口（/v1/messages）
-// 另外接受 x-api-key 头（Claude Code 用 ANTHROPIC_API_KEY 时发这个）。
+// bearer 不区分大小写；所有接口都另外接受 x-api-key / api-key 头。
 func requestAPIKey(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if value := strings.TrimPrefix(auth, "Bearer "); value != "" && value != auth {
-		return value
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
+		if value := strings.TrimSpace(auth[7:]); value != "" {
+			return value
+		}
 	}
-	if strings.HasPrefix(r.URL.Path, "/v1/messages") {
-		return strings.TrimSpace(r.Header.Get("X-Api-Key"))
+	// x-api-key / api-key：Claude Code、部分 Codex 账号管理工具和 Azure 风格客户端用这个头。
+	for _, h := range []string{"X-Api-Key", "Api-Key"} {
+		if value := strings.TrimSpace(r.Header.Get(h)); value != "" {
+			return value
+		}
 	}
 	return ""
 }

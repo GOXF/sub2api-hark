@@ -35,6 +35,9 @@ type SourceAccount struct {
 	// Bridge says the account's local file bridge is registered in Hark and
 	// switched on. Requests that ask for the bridge only start on such accounts.
 	Bridge bool
+	// Timezone 可选：该账号新建 Project、发消息时使用的 IANA 时区
+	// （例如按代理出口 IP 所在地探测）。空或无效则用全局设置。
+	Timezone string
 }
 
 // AccountSource lets an embedding application (for example a desktop app)
@@ -197,6 +200,10 @@ func (s *Server) syncAccounts(ctx context.Context) error {
 		}
 		if src.UserID != "" {
 			a.UserID = src.UserID
+		}
+		a.Timezone = ""
+		if tz := strings.TrimSpace(src.Timezone); ValidTimezone(tz) {
+			a.Timezone = tz
 		}
 		switch {
 		case src.Disabled || src.Cookie == "":

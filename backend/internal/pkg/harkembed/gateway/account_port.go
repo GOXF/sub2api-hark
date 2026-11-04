@@ -40,6 +40,8 @@ type PortAccount struct {
 	Cookies   []PortCookie `json:"cookies,omitempty"`
 	UserAgent string       `json:"user_agent,omitempty"`
 	Proxy     string       `json:"proxy,omitempty"`
+	// Timezone 可选：账号专用 IANA 时区。
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // PortFile 导出文件。
@@ -125,6 +127,9 @@ func ParsePortFile(b []byte) ([]PortAccount, error) {
 		a.Name = strings.TrimSpace(a.Name)
 		a.Cookie = strings.TrimSpace(a.Cookie)
 		a.Proxy = strings.TrimSpace(a.Proxy)
+		if a.Timezone = strings.TrimSpace(a.Timezone); !ValidTimezone(a.Timezone) {
+			a.Timezone = ""
+		}
 		if a.Cookie == "" && len(a.Cookies) > 0 {
 			a.Cookie = CookieHeader(a.Cookies)
 		}
@@ -162,7 +167,7 @@ func (s *Server) exportAccounts(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		for _, a := range s.accounts {
 			if a.Cookie != "" {
-				list = append(list, PortAccount{Name: a.Name, Cookie: a.Cookie, UserAgent: a.UserAgent, Proxy: a.Proxy})
+				list = append(list, PortAccount{Name: a.Name, Cookie: a.Cookie, UserAgent: a.UserAgent, Proxy: a.Proxy, Timezone: a.Timezone})
 			}
 		}
 		s.mu.Unlock()
@@ -235,13 +240,16 @@ func (s *Server) importAccounts(w http.ResponseWriter, r *http.Request) {
 					if a.UserAgent != "" {
 						s.accounts[i].UserAgent = a.UserAgent
 					}
+					if a.Timezone != "" {
+						s.accounts[i].Timezone = a.Timezone
+					}
 					dup = true
 					res.Updated++
 					break
 				}
 			}
 			if !dup {
-				s.accounts = append(s.accounts, Account{ID: randomID("acct_"), Name: name, Status: "unchecked", Detail: "已从文件导入", Cookie: a.Cookie, Proxy: a.Proxy, UserAgent: a.UserAgent})
+				s.accounts = append(s.accounts, Account{ID: randomID("acct_"), Name: name, Status: "unchecked", Detail: "已从文件导入", Cookie: a.Cookie, Proxy: a.Proxy, UserAgent: a.UserAgent, Timezone: a.Timezone})
 				res.Added++
 			}
 		}

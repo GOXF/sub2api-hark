@@ -39,9 +39,6 @@ type turnResult struct {
 // runTurn forwards one client request into its Hark Project and waits for the
 // correlated, completed reply.
 func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, res *turnResult, hooks turnHooks) error {
-	s.mu.Lock()
-	zone := s.settings.Timezone
-	s.mu.Unlock()
 	res.Isolation = "key-session"
 	if v.SessionID == "" {
 		res.Isolation = "per-request"
@@ -119,7 +116,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 				}
 				return err
 			}
-			cid, atts, err := s.prepareProject(ctx, a, zone, files)
+			cid, atts, err := s.prepareProject(ctx, a, s.zoneFor(a), files)
 			if err == nil {
 				account, release, attachments = a, rel, atts
 				s.projectMu.Lock()
@@ -146,7 +143,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 		}
 	}
 
-	payload := s.nativeProjectPayload(v, zone, p.ConversationID, text, attachments, account.UserID)
+	payload := s.nativeProjectPayload(v, s.zoneFor(account), p.ConversationID, text, attachments, account.UserID)
 	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
 		s.projectMu.Lock()
 		p.Sent, p.Systems = plan.sent, plan.systems
