@@ -512,6 +512,9 @@ export default {
         }
       },
       usageWindow: {
+        harkDaily: '今日',
+        harkPool: '本期',
+        harkUsed: '今日 {daily} · 本期 {pool}',
         statsTitle: '5小时窗口用量统计',
         statsTitleDaily: '每日用量统计',
         geminiProDaily: 'Pro',

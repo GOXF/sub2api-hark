@@ -1540,7 +1540,24 @@ export interface AccountUsageInfo {
   // 机器可读错误码：forbidden / unauthenticated / rate_limited / network_error
   error_code?: string
 
+  // Hark 额度（/api/billing/summary：今日与本期计量）
+  hark_usage?: HarkUsageInfo | null
+
   error?: string            // usage 获取失败时的错误信息
+}
+
+export interface HarkUsageMeter {
+  used: number
+  limit: number
+  utilization: number // 使用率百分比（0-100+）
+  resets_at: string | null
+  remaining_seconds: number
+}
+
+export interface HarkUsageInfo {
+  plan?: string
+  daily?: HarkUsageMeter | null
+  pool?: HarkUsageMeter | null
 }
 
 // OpenAI Codex usage snapshot (from response headers)

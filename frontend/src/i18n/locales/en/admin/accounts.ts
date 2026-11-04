@@ -1711,6 +1711,9 @@ export default {
         noData: 'No usage data available for this account'
       },
       usageWindow: {
+        harkDaily: 'Day',
+        harkPool: 'Pool',
+        harkUsed: 'Today {daily} · Pool {pool}',
         statsTitle: '5-Hour Window Usage Statistics',
         statsTitleDaily: 'Daily Usage Statistics',
         geminiProDaily: 'Pro',
