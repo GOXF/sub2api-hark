@@ -10,16 +10,20 @@
 package harkembed
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/harkembed/gateway"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Host is the in-process host name of the Hark gateway.
@@ -113,7 +117,45 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 	if in.Body == nil {
 		in.Body = http.NoBody
 	}
+	if err := forceHarkModel(in); err != nil {
+		return nil, fmt.Errorf("hark gateway: read request body: %w", err)
+	}
 	return serve(s.EmbeddedHandler(), in), nil
+}
+
+// Model is the only model name the Hark gateway accepts.
+const Model = "hark"
+
+// forceHarkModel rewrites the JSON body's "model" to Model for the gateway's
+// POST endpoints (Chat Completions, Responses, Anthropic Messages, ...): the
+// gateway rejects any other model ("当前模型别名为 hark"), while clients such as
+// Codex or Claude Code send their own model names. The account's model mapping
+// has already been applied by sub2api; a mapped name other than Model is
+// forced as well. Non-JSON bodies are left untouched.
+func forceHarkModel(req *http.Request) error {
+	if req.Method != http.MethodPost || req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	if ct := strings.ToLower(req.Header.Get("Content-Type")); ct != "" && !strings.Contains(ct, "json") {
+		return nil
+	}
+	body, err := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	if err != nil {
+		return err
+	}
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' && gjson.ValidBytes(trimmed) {
+		if m := gjson.GetBytes(trimmed, "model"); m.Type != gjson.String || m.Str != Model {
+			if out, setErr := sjson.SetBytes(trimmed, "model", Model); setErr == nil {
+				body = out
+			}
+		}
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	return nil
 }
 
 // serve runs h and returns its response as soon as the headers are written,
