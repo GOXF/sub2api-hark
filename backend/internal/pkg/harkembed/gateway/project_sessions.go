@@ -329,7 +329,6 @@ func (s *Server) cleanupProjects(now time.Time, idle time.Duration) {
 
 func (s *Server) RunProjectCleanup(ctx context.Context, idle time.Duration) {
 	s.cleanupProjects(time.Now(), idle)
-	s.prewarmSpares()
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -338,7 +337,6 @@ func (s *Server) RunProjectCleanup(ctx context.Context, idle time.Duration) {
 			return
 		case now := <-ticker.C:
 			s.cleanupProjects(now, idle)
-			s.prewarmSpares()
 		}
 	}
 }

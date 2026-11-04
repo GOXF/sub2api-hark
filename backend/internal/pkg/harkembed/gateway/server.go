@@ -86,9 +86,6 @@ type Server struct {
 	logins        map[string]*loginAttempt
 	projectMu     sync.Mutex
 	projects      map[string]*projectSession
-	agentCreate   sync.Map // cookie fingerprint → *agentCreator
-	agentPoll     time.Duration
-	agentFileMu   sync.Mutex
 
 	upstream          string
 	publicBaseURL     string
@@ -246,7 +243,6 @@ func New(data string) (*Server, error) {
 	if err := s.loadAccounts(); err != nil {
 		return nil, err
 	}
-	s.loadAgentProjects()
 	if err := s.loadProjects(); err != nil {
 		return nil, err
 	}

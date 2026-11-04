@@ -214,16 +214,7 @@ func (s *Server) candidatesFor(exclude map[string]bool, needBridge bool) ([]Acco
 	if len(usable) == 0 {
 		return nil, &upstreamError{429, "quota_exhausted", "所有可用 Hark 账号额度已用尽，请等待额度重置"}
 	}
-	// Accounts with a ready Project come first: starting a session there skips
-	// creating a Project (two Hark agent runs on an account's first use).
-	spare := make(map[string]bool, len(usable))
-	for _, a := range usable {
-		spare[a.ID] = s.hasSpare(a.ID)
-	}
 	sort.SliceStable(usable, func(i, j int) bool {
-		if spare[usable[i].ID] != spare[usable[j].ID] {
-			return spare[usable[i].ID]
-		}
 		return usable[i].LastUsed < usable[j].LastUsed
 	})
 	return usable, nil
