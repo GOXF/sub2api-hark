@@ -226,11 +226,15 @@ var providerProfiles = map[string]*ProviderProfile{
 		DefaultMode:      AccountModePayG,
 		DefaultTestModel: DefaultHarkTestModel,
 		// Hark 账号的 API Key 是网页登录 Cookie；请求由进程内 hark2api 处理（见 hark.go）。
+		// hark2api 原生提供 Chat Completions、Responses 与 Anthropic Messages，
+		// api_protocol 未设置时默认 adaptive，按入站协议走同协议原生端点。
 		Modes: map[string]ProviderEndpoints{
 			AccountModePayG: {
 				BaseURLs: map[string]string{
 					APIProtocolChatCompletions: DefaultHarkBaseURL,
 					APIProtocolResponses:       DefaultHarkBaseURL,
+					// 上游路径为 {base}/v1/messages（见 nativeAnthropicMessagesURL），故不带 /v1。
+					APIProtocolAnthropic: DefaultHarkAnthropicBaseURL,
 				},
 			},
 		},

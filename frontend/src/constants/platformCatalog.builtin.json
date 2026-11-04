@@ -291,6 +291,7 @@
           {
             "mode": "payg",
             "base_urls": {
+              "anthropic": "http://hark.internal",
               "chat_completions": "http://hark.internal/v1",
               "responses": "http://hark.internal/v1"
             }

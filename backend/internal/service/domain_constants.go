@@ -95,6 +95,8 @@ const (
 	DefaultClineBaseURL = "https://api.cline.bot/api/v1"
 	// DefaultHarkBaseURL 是进程内 Hark 网关（不出网，见 internal/pkg/harkembed）。
 	DefaultHarkBaseURL = "http://hark.internal/v1"
+	// DefaultHarkAnthropicBaseURL 是进程内 Hark 网关的 Anthropic 协议基址（上游 {base}/v1/messages）。
+	DefaultHarkAnthropicBaseURL = "http://hark.internal"
 )
 
 // 国产供应商 Anthropic 协议端点的默认 base_url（上游路径为 {base}/v1/messages）。

@@ -281,6 +281,10 @@ func NewAccountTestService(
 }
 
 func (s *AccountTestService) validateUpstreamBaseURL(raw string) (string, error) {
+	if isHarkInternalURL(raw) {
+		// 进程内 Hark 网关，不出网（见 hark.go），与 OpenAI 网关转发同一放行规则。
+		return strings.TrimRight(strings.TrimSpace(raw), "/"), nil
+	}
 	if s.cfg == nil {
 		return "", errors.New("config is not available")
 	}

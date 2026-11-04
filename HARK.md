@@ -12,7 +12,14 @@ Hark（hark.com）网页账号像其它 API Key 账号一样在 sub2api 里导�
   [hark2api](https://github.com/GOXF/hark2api) 网关（嵌入模式）处理：建 Project、发消息、取回复，
   用账号绑定的 sub2api 代理访问 hark.com。
 - 选号、并发、冷却、换号都由 sub2api 负责；hark2api 只用指定的那个账号，Cookie 失效返回 401，被 Cloudflare 拦返回 403。
-- 模型名：`hark`。支持 Chat Completions 与 Responses。
+- 模型名：`hark`。原生支持三种协议，按入站协议走 hark2api 同协议端点，不做协议转换：
+  - Chat Completions：`/v1/chat/completions` → `http://hark.internal/v1/chat/completions`
+  - Responses（Codex，含 tools）：`/v1/responses` → `http://hark.internal/v1/responses`
+  - Anthropic Messages（Claude Code）：`/v1/messages` → `http://hark.internal/v1/messages`
+- `api_protocol` 未设置时 Hark 账号默认 `adaptive`（即上面的按入站协议分流）；显式设为
+  `chat_completions` / `responses` / `anthropic` 时按该协议转发（其余入站协议经转换）。
+  分协议地址可用 `api_base_urls` 覆盖，默认 Chat/Responses 为 `http://hark.internal/v1`，Anthropic 为 `http://hark.internal`。
+- 会话头：Codex 的 `session_id` / `session-id`、Claude Code 的 `X-Claude-Code-Session-Id` 透传给 hark2api，同一对话复用同一个 Project。
 
 ## 导入账号
 
@@ -49,7 +56,7 @@ hark2api 的会话与 Project 状态存在 `$HARK_DATA_DIR`，默认 `$DATA_DIR/
 
 - 改动面：`internal/pkg/harkembed/`、`internal/service/hark.go`、平台登记（`domain/constants.go`、`domain/platforms.go`、
   `service/domain_constants.go`、`service/provider_profile.go`）、`repository/http_upstream.go` 两行钩子、
-  `openai_gateway_request_body.go` 放行 hark.internal、前端 `platformCatalog.builtin.json`。
+  `openai_gateway_request_body.go` 与 `account_test_service.go` 放行 hark.internal、`account.go` 中 Hark 默认 adaptive、前端 `platformCatalog.builtin.json`。
 - `.github/workflows/hark-sync.yml`：定期合并官方 main、同步 hark2api、测试通过后推送并重建镜像；合并冲突时开 issue。
   需要仓库机密 `HARK2API_TOKEN`（能读 GOXF/hark2api 的 PAT）。
 - `.github/workflows/hark-image.yml`：镜像 `ghcr.io/goxf/sub2api-hark:latest`。

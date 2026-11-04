@@ -1567,8 +1567,9 @@ func (a *Account) GetAPIProtocol() string {
 	case APIProtocolChatCompletions:
 		return APIProtocolChatCompletions
 	}
-	// 按模型分流的供应商（多模型聚合平台）未显式配置时默认 adaptive。
-	if a.routesByModel() {
+	// 按模型分流的供应商（多模型聚合平台）未显式配置时默认 adaptive；Hark 内嵌
+	// 网关原生支持三种协议，同样默认 adaptive，避免 Responses / Messages 被转成 CC。
+	if a.routesByModel() || a.IsHark() {
 		return APIProtocolAdaptive
 	}
 	return APIProtocolChatCompletions
