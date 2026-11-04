@@ -173,8 +173,13 @@ func (s *Server) exportAccounts(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.event("info", "导出账号", "共 "+itoa(len(list))+" 个")
 	s.mu.Unlock()
-	w.Header().Set("Content-Disposition", `attachment; filename="hark-accounts-`+time.Now().Format("20060102-1504")+`.json"`)
 	w.Header().Set("Cache-Control", "no-store")
+	if r.URL.Query().Get("format") == "sub2api" {
+		w.Header().Set("Content-Disposition", `attachment; filename="sub2api-hark-`+time.Now().Format("20060102-1504")+`.json"`)
+		write(w, 200, Sub2APIFile(list, time.Now()))
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="hark-accounts-`+time.Now().Format("20060102-1504")+`.json"`)
 	write(w, 200, PortFile{Format: PortFormat, Version: 1, ExportedAt: time.Now().Format(time.RFC3339), Accounts: list})
 }
 

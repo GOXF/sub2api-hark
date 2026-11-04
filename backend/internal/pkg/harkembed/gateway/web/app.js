@@ -79,7 +79,7 @@ function overview() {
 }
 const accountStatus = {unchecked:["未检测",""], valid:["会话有效",""], expired:["会话失效","red"], blocked:["访问受阻","amber"], limited:["检测限流","amber"], error:["检测失败","red"]};
 function accounts() {
-  return `${heading("CONNECTIONS", "账号管理", "管理 Hark 登录会话，查看每个账号的连接状态。", `${state.accounts.length ? `<button class="btn" data-action="batch-proxy">${icon("globe")}批量设置代理</button>` : ""}${state.accounts_portable !== false ? `<button class="btn" data-action="export-accounts">${icon("arrow")}导出账号</button>` : ""}<button class="btn primary" data-action="import-account">${icon("plus")}导入账号</button>`)}
+  return `${heading("CONNECTIONS", "账号管理", "管理 Hark 登录会话，查看每个账号的连接状态。", `${state.accounts.length ? `<button class="btn" data-action="batch-proxy">${icon("globe")}批量设置代理</button>` : ""}${state.accounts_portable !== false ? `<button class="btn" data-action="export-accounts">${icon("arrow")}导出账号</button><button class="btn" data-action="export-accounts" data-format="sub2api" title="导出为 sub2api 账号导入文件（Hark 平台）">${icon("arrow")}导出到 sub2api</button>` : ""}<button class="btn primary" data-action="import-account">${icon("plus")}导入账号</button>`)}
     ${state.accounts.length ? `<div class="account-grid">${state.accounts.map(a => { const badge = accountStatus[a.status] || accountStatus.error; return `<article class="account-card"><div class="account-top"><span class="account-avatar">${esc(a.name.slice(0,1).toUpperCase())}</span><div><strong>${esc(a.name)}</strong><small>Hark · ${a.proxy ? `代理 ${esc(a.proxy)}` : "已保存"}</small></div><span class="badge ${badge[1]}">${badge[0]}</span></div><div class="account-proxy"><label>${icon("globe")}代理</label>${proxySelect(a)}</div><div class="account-detail">${esc(a.detail)}<br><span class="muted">最后检测：${date(a.checked)}</span><br><span class="muted">${usageText(a)} · 进行中 ${Number(a.in_flight||0)}</span></div><div class="account-bottom"><button class="btn small" data-action="check-account" data-id="${esc(a.id)}">${icon("refresh")}检测会话</button><button class="btn small" data-action="refresh-usage" data-id="${esc(a.id)}">${icon("clock")}刷新额度</button><button class="text-link" data-action="delete-account" data-id="${esc(a.id)}">移除账号</button></div></article>`; }).join("")}</div>` : `<section class="panel empty-state"><div class="empty-icon">${icon("user")}</div><h2>连接你的第一个 Hark 账号</h2><p>输入账号名称并粘贴 Cookie，导入后检测会话状态。</p><button class="btn primary" data-action="import-account">${icon("plus")}导入账号</button></section>`}
     <div class="info-strip">${icon("clock")}<div>Cookie 已加密保存在本机，服务重启后自动恢复。API 会话分别使用 Project，并要求 Hark 只使用当前 Project 和客户端提供的上下文，不读取其他 Project 或全局记忆。这是行为约束，不是账号权限隔离。</div></div>`;
 }
@@ -320,7 +320,8 @@ document.addEventListener("click", async event => {
       case "delete-proxy": modal("删除代理？", "已分配这个代理的账号会改回默认。", `<div class="modal-error" role="alert"></div><div class="form-actions"><button class="btn subtle" data-action="close-modal">取消</button><button class="btn danger" data-action="confirm-delete" data-kind="proxies" data-id="${esc(id)}">确认删除</button></div>`); break;
       case "export-accounts": {
         button.disabled=true;
-        const response=await fetch("/admin/accounts/export",{headers:{"X-Hark-Admin":"1"}});
+        const fmt=button.dataset.format||"";
+        const response=await fetch("/admin/accounts/export"+(fmt?`?format=${encodeURIComponent(fmt)}`:""),{headers:{"X-Hark-Admin":"1"}});
         const text=await response.text();
         if(!response.ok){let msg=`导出失败 (${response.status})`;try{msg=JSON.parse(text).error?.message||msg;}catch{}throw new Error(msg);}
         const count=(JSON.parse(text).accounts||[]).length;
