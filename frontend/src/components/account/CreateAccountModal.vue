@@ -109,6 +109,22 @@
             </svg>
             OpenAI
           </button>
+          <!-- Hark：通用多协议表单（同聚合供应商），按钮紧随 OpenAI 展示 -->
+          <button
+            v-if="harkPlatformSpec"
+            type="button"
+            data-testid="platform-button-hark"
+            @click="selectGenericMultiProtocolPlatform(harkPlatformSpec.id)"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === harkPlatformSpec.id
+                ? 'bg-white text-primary-600 shadow-sm dark:bg-dark-600 dark:text-primary-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <PlatformIcon :platform="harkPlatformSpec.id" size="sm" />
+            {{ harkPlatformSpec.display_name }}
+          </button>
           <button
             type="button"
             @click="form.platform = 'gemini'"
@@ -4437,8 +4453,14 @@ const isMultiProtocolPlatform = computed(() => isMultiProtocolApiKeyPlatform(for
 const isGenericMultiProtocolPlatform = computed(
   () => isMultiProtocolPlatform.value && !isCNPlatform.value && !isOpenCodeGoPlatform.value
 )
+// Hark 在第一行紧随 OpenAI 展示，不放在聚合供应商行。
+const harkPlatformSpec = computed(() =>
+  listPlatforms().find(spec => spec.id === 'hark' && !!spec.multi_protocol)
+)
 const extraMultiProtocolPlatforms = computed(() =>
-  listPlatforms().filter(spec => !!spec.multi_protocol && !isCNProviderPlatform(spec.id) && spec.id !== 'opencode_go')
+  listPlatforms().filter(
+    spec => !!spec.multi_protocol && !isCNProviderPlatform(spec.id) && spec.id !== 'opencode_go' && spec.id !== 'hark'
+  )
 )
 const genericAccountModes = computed(() => providerAccountModes(form.platform))
 // 按模型分流的供应商（OpenCode 等）：adaptive 账号携带 protocol_rules。

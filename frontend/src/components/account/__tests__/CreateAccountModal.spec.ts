@@ -679,7 +679,18 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     const labels = (testid: string) =>
       wrapper.get(`[data-testid="${testid}"]`).findAll('button').map(button => button.text().trim())
     expect(labels('platform-row-cn')).toEqual(['Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax'])
-    expect(labels('platform-row-aggregators')).toEqual(['OpenCode', 'Command Code', 'Cline', 'Hark'])
+    expect(labels('platform-row-aggregators')).toEqual(['OpenCode', 'Command Code', 'Cline'])
+  })
+
+  it('shows Hark right after OpenAI in the first platform row', () => {
+    const wrapper = mountModal()
+    const firstRow = wrapper
+      .get('[data-tour="account-form-platform"]')
+      .findAll('button')
+      .map(button => button.text().trim())
+    const openai = firstRow.indexOf('OpenAI')
+    expect(openai).toBeGreaterThanOrEqual(0)
+    expect(firstRow[openai + 1]).toBe('Hark')
   })
 
   it('creates a Cline account without an account type and with only the Chat Completions endpoint', async () => {

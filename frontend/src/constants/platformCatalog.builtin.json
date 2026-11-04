@@ -15,6 +15,26 @@
       "litellm_provider": "openai"
     },
     {
+      "id": "hark",
+      "display_name": "Hark",
+      "gateway": "openai",
+      "cn_provider": false,
+      "multi_protocol": {
+        "default_mode": "payg",
+        "routing": "by_inbound",
+        "modes": [
+          {
+            "mode": "payg",
+            "base_urls": {
+              "anthropic": "http://hark.internal",
+              "chat_completions": "http://hark.internal/v1",
+              "responses": "http://hark.internal/v1"
+            }
+          }
+        ]
+      }
+    },
+    {
       "id": "gemini",
       "display_name": "Gemini",
       "gateway": "gemini",
@@ -274,26 +294,6 @@
             "mode": "payg",
             "base_urls": {
               "chat_completions": "https://api.cline.bot/api/v1"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "id": "hark",
-      "display_name": "Hark",
-      "gateway": "openai",
-      "cn_provider": false,
-      "multi_protocol": {
-        "default_mode": "payg",
-        "routing": "by_inbound",
-        "modes": [
-          {
-            "mode": "payg",
-            "base_urls": {
-              "anthropic": "http://hark.internal",
-              "chat_completions": "http://hark.internal/v1",
-              "responses": "http://hark.internal/v1"
             }
           }
         ]
