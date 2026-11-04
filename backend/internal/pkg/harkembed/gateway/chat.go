@@ -315,6 +315,13 @@ func commonPrefix(a, b string) int {
 
 func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest, format outputFormat) {
 	w.Header().Set("X-Hark-Context-Isolation", "instruction-only")
+	toolsNote := ""
+	switch {
+	case v.ToolsDeclared > 0 && s.forwardExtra:
+		toolsNote = "已开启 forward-extra，未做工具调用模拟"
+	case v.ToolsDeclared > 0 && len(v.Tools) == 0:
+		toolsNote = "tool_choice 为 none"
+	}
 	if s.forwardExtra {
 		v.Tools = nil // 原样转发 tools 给 Hark（ForwardExtra），不做工具调用模拟
 	}
@@ -325,11 +332,15 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	defer cancel()
 	res := &turnResult{}
 	rec := reqRecFrom(r.Context())
-	rec.update(func(l *RequestLog) { l.Model, l.Stream, l.Session = v.Model, v.Stream, v.SessionID != "" })
+	rec.update(func(l *RequestLog) {
+		l.Model, l.Stream, l.Session = v.Model, v.Stream, v.SessionID != ""
+		l.ToolsDeclared, l.ToolsSent, l.ToolsNote = v.ToolsDeclared, len(v.Tools), toolsNote
+	})
 	defer func() {
 		rec.update(func(l *RequestLog) {
 			l.Account, l.AccountID, l.Attempts, l.Skipped = res.AccountName, res.AccountID, res.Attempts, res.Skipped
 			l.Reused, l.Files, l.Outcome, l.ReplyChars = res.Reused, res.Files, res.Outcome, len([]rune(res.Text))
+			l.ToolCalls = len(res.ToolCalls)
 		})
 	}()
 	if !v.Stream {

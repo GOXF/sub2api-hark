@@ -62,10 +62,12 @@ type chatRequest struct {
 	// in the body or X-Hark-Bridge: true). It only affects new sessions.
 	Bridge bool `json:"hark_bridge,omitempty"`
 	// Tools / ToolChoice：客户端声明的工具（见 tools.go 的工具调用模拟）。
-	Tools        []toolSpec      `json:"-"`
-	ToolChoice   string          `json:"-"`
-	OriginalBody json.RawMessage `json:"-"`
-	extra        map[string]json.RawMessage
+	Tools      []toolSpec `json:"-"`
+	ToolChoice string     `json:"-"`
+	// ToolsDeclared 客户端请求里声明的工具数（tool_choice=none 等丢弃之前），请求记录用。
+	ToolsDeclared int             `json:"-"`
+	OriginalBody  json.RawMessage `json:"-"`
+	extra         map[string]json.RawMessage
 }
 
 // maxChatBody allows roughly three maximum-size base64 attachments plus text.
@@ -296,7 +298,7 @@ func parseEnvelope(object map[string]json.RawMessage, v *chatRequest) error {
 	if err != nil {
 		return err
 	}
-	v.Tools = tools
+	v.Tools, v.ToolsDeclared = tools, len(tools)
 	v.ToolChoice = parseToolChoice(object["tool_choice"])
 	if v.ToolChoice == "none" {
 		v.Tools = nil

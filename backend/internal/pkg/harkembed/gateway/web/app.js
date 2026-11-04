@@ -79,7 +79,7 @@ function overview() {
 }
 const accountStatus = {unchecked:["未检测",""], valid:["会话有效",""], expired:["会话失效","red"], blocked:["访问受阻","amber"], limited:["检测限流","amber"], error:["检测失败","red"]};
 function accounts() {
-  return `${heading("CONNECTIONS", "账号管理", "管理 Hark 登录会话，查看每个账号的连接状态。", `${state.accounts.length ? `<button class="btn" data-action="batch-proxy">${icon("globe")}批量设置代理</button>` : ""}${state.accounts_portable !== false ? `<button class="btn" data-action="export-accounts">${icon("arrow")}导出账号</button><button class="btn" data-action="export-accounts" data-format="sub2api" title="导出为 sub2api 账号导入文件（Hark 平台）">${icon("arrow")}导出到 sub2api</button>` : ""}<button class="btn primary" data-action="import-account">${icon("plus")}导入账号</button>`)}
+  return `${heading("CONNECTIONS", "账号管理", "管理 Hark 登录会话，查看每个账号的连接状态。", `${state.accounts.length ? `<button class="btn" data-action="check-all-accounts">${icon("refresh")}检测全部会话</button><button class="btn" data-action="batch-proxy">${icon("globe")}批量设置代理</button>` : ""}${state.accounts_portable !== false ? `<button class="btn" data-action="export-accounts">${icon("arrow")}导出账号</button><button class="btn" data-action="export-accounts" data-format="sub2api" title="导出为 sub2api 账号导入文件（Hark 平台）">${icon("arrow")}导出到 sub2api</button>` : ""}<button class="btn primary" data-action="import-account">${icon("plus")}导入账号</button>`)}
     ${state.accounts.length ? `<div class="account-grid">${state.accounts.map(a => { const badge = accountStatus[a.status] || accountStatus.error; return `<article class="account-card"><div class="account-top"><span class="account-avatar">${esc(a.name.slice(0,1).toUpperCase())}</span><div><strong>${esc(a.name)}</strong><small>Hark · ${a.proxy ? `代理 ${esc(a.proxy)}` : "已保存"}</small></div><span class="badge ${badge[1]}">${badge[0]}</span></div><div class="account-proxy"><label>${icon("globe")}代理</label>${proxySelect(a)}</div><div class="account-detail">${esc(a.detail)}<br><span class="muted">最后检测：${date(a.checked)}</span><br><span class="muted">${usageText(a)} · 进行中 ${Number(a.in_flight||0)}</span></div><div class="account-bottom"><button class="btn small" data-action="check-account" data-id="${esc(a.id)}">${icon("refresh")}检测会话</button><button class="btn small" data-action="refresh-usage" data-id="${esc(a.id)}">${icon("clock")}刷新额度</button><button class="text-link" data-action="delete-account" data-id="${esc(a.id)}">移除账号</button></div></article>`; }).join("")}</div>` : `<section class="panel empty-state"><div class="empty-icon">${icon("user")}</div><h2>连接你的第一个 Hark 账号</h2><p>输入账号名称并粘贴 Cookie，导入后检测会话状态。</p><button class="btn primary" data-action="import-account">${icon("plus")}导入账号</button></section>`}
     <div class="info-strip">${icon("clock")}<div>Cookie 已加密保存在本机，服务重启后自动恢复。API 会话分别使用 Project，并要求 Hark 只使用当前 Project 和客户端提供的上下文，不读取其他 Project 或全局记忆。这是行为约束，不是账号权限隔离。</div></div>`;
 }
@@ -189,18 +189,23 @@ function reqStatus(l) {
   if (l.status >= 400 || l.code) return `<span class="badge red" title="${esc(l.code)}">${esc(l.status)} ${esc(reqCodeText[l.code] || l.code || "失败")}</span>`;
   return `<span class="badge"><span class="status-dot"></span>${esc(l.status)}</span>`;
 }
+function reqTools(l) {
+  if (!l.tools_declared) return '<span class="muted">未带</span>';
+  if (!l.tools_sent) return `<span class="badge red" title="${esc(l.tools_note || "")}">${l.tools_declared} 个 · 未生效</span>`;
+  return `${l.tools_sent} 个${l.tool_calls ? ` <span class="muted">调用 ${l.tool_calls}</span>` : ""}`;
+}
 function ms(v) { return v >= 1000 ? `${(v/1000).toFixed(1)} s` : `${v} ms`; }
 function requests() {
   const st = (reqData && reqData.stats) || state.request_stats || {total:0, ok:0, failed:0, last_hour:0, avg_ms:0, in_progress:0};
   const list = reqData ? reqData.requests : null;
   const accts = state.accounts.map(a => `<option value="${esc(a.id)}" ${reqFilter.account === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("");
   const keyNames = [...new Set(state.keys.map(k => k.name).concat("控制台测试"))].map(n => `<option value="${esc(n)}" ${reqFilter.key === n ? "selected" : ""}>${esc(n)}</option>`).join("");
-  const rows = list === null ? '<tr><td colspan="8" class="muted">正在读取…</td></tr>' : !list.length ? '<tr><td colspan="8" class="muted">还没有请求记录</td></tr>' :
-    list.map(l => `<tr><td class="muted">${date(l.time, true)}</td><td>${esc(l.key || "—")}</td><td>${esc(l.path.replace("/v1/","").replace("/admin/playground/","控制台/"))}${l.stream ? ' <span class="badge">流式</span>' : ""}</td><td>${esc(l.account || "—")}${l.reused ? ' <span class="muted">复用</span>' : ""}</td><td>${l.attempts || 0}${l.skipped && l.skipped.length ? ` <span class="muted" title="${esc(l.skipped.join("\n"))}">跳过 ${l.skipped.length}</span>` : ""}</td><td>${reqStatus(l)}</td><td>${ms(l.duration_ms)}</td><td class="muted">${l.reply_chars ? l.reply_chars + " 字" : ""}${l.files ? ` · ${l.files} 附件` : ""}</td></tr>`).join("");
+  const rows = list === null ? '<tr><td colspan="9" class="muted">正在读取…</td></tr>' : !list.length ? '<tr><td colspan="9" class="muted">还没有请求记录</td></tr>' :
+    list.map(l => `<tr><td class="muted">${date(l.time, true)}</td><td>${esc(l.key || "—")}</td><td>${esc(l.path.replace("/v1/","").replace("/admin/playground/","控制台/"))}${l.stream ? ' <span class="badge">流式</span>' : ""}</td><td>${esc(l.account || "—")}${l.reused ? ' <span class="muted">复用</span>' : ""}</td><td>${l.attempts || 0}${l.skipped && l.skipped.length ? ` <span class="muted" title="${esc(l.skipped.join("\n"))}">跳过 ${l.skipped.length}</span>` : ""}</td><td>${reqStatus(l)}</td><td>${ms(l.duration_ms)}</td><td>${reqTools(l)}</td><td class="muted">${l.reply_chars ? l.reply_chars + " 字" : ""}${l.files ? ` · ${l.files} 附件` : ""}</td></tr>`).join("");
   return `${heading("TRAFFIC", "请求记录", "每次 API 调用用了哪个 Key、哪个账号、试了几次、结果如何。只保存在内存，最多最近 500 条，不含消息内容。", `<button class="btn subtle" data-action="clear-requests">清空</button><button class="btn" data-action="refresh-requests">${icon("refresh")}刷新</button>`)}
   <section class="stats" aria-label="请求统计"><div class="stat"><div class="stat-top">请求${icon("list")}</div><div class="stat-number">${st.total}<small>条</small></div><div class="stat-caption">最近 1 小时 ${st.last_hour} 条 · 进行中 ${st.in_progress}</div></div><div class="stat"><div class="stat-top">成功${icon("check")}</div><div class="stat-number">${st.ok}<small>条</small></div><div class="stat-caption">${st.total ? Math.round(st.ok*100/st.total) : 0}% 成功率</div></div><div class="stat"><div class="stat-top">失败${icon("close")}</div><div class="stat-number">${st.failed}<small>条</small></div><div class="stat-caption">平均耗时 ${ms(st.avg_ms)}</div></div></section>
   <div class="log-toolbar"><select id="req-account" aria-label="按账号筛选"><option value="">全部账号</option>${accts}</select><select id="req-key" aria-label="按 Key 筛选"><option value="">全部 Key</option>${keyNames}</select><label class="muted"><input type="checkbox" id="req-failed" ${reqFilter.failed ? "checked" : ""}> 只看失败</label></div>
-  <section class="panel table-wrap"><table><thead><tr><th>时间</th><th>KEY</th><th>接口</th><th>账号</th><th>尝试</th><th>结果</th><th>耗时</th><th>回复</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  <section class="panel table-wrap"><table><thead><tr><th>时间</th><th>KEY</th><th>接口</th><th>账号</th><th>尝试</th><th>结果</th><th>耗时</th><th>工具</th><th>回复</th></tr></thead><tbody>${rows}</tbody></table></section>`;
 }
 async function loadRequests() {
   const q = new URLSearchParams({limit:"200"});
@@ -292,6 +297,16 @@ document.addEventListener("click", async event => {
         let data; try { data=JSON.parse(requestDraft); } catch { data={model:"hark", messages:[{role:"user", content:""}], stream:false}; }
         data.session_id=newSessionId();
         requestDraft=JSON.stringify(data,null,2);testOutput=null;liveOutput=null;pendingFiles=[];render();toast("已开始新对话，下次发送将新建 Project");
+        break;
+      }
+      case "check-all-accounts": {
+        const ids=state.accounts.map(a=>a.id); let done=0, failed=0, next=0;
+        button.disabled=true; button.textContent=`正在检测 0/${ids.length}…`;
+        const worker=async()=>{ while(next<ids.length){ const aid=ids[next++]; try { await api(`/admin/accounts/${encodeURIComponent(aid)}/check`,"POST",{}); } catch { failed++; } done++; button.textContent=`正在检测 ${done}/${ids.length}…`; } };
+        await Promise.all(Array.from({length:Math.min(3, ids.length)}, worker));
+        await load();
+        const valid=state.accounts.filter(a=>a.status==="valid").length;
+        toast(`全部会话检测完成：有效 ${valid} / ${state.accounts.length}${failed ? `，${failed} 个检测请求出错` : ""}`);
         break;
       }
       case "check-account": button.disabled=true; button.textContent="正在检测…"; await api(`/admin/accounts/${encodeURIComponent(id)}/check`,"POST",{}); await load(); toast("会话检测完成"); break;

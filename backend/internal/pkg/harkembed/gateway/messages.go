@@ -346,7 +346,7 @@ func (s *Server) normalizeMessages(b []byte) (chatRequest, string, error) {
 	if err != nil {
 		return v, "", err
 	}
-	v.Tools, v.ToolChoice = tools, parseAnthropicToolChoice(object["tool_choice"])
+	v.Tools, v.ToolChoice, v.ToolsDeclared = tools, parseAnthropicToolChoice(object["tool_choice"]), len(tools)
 	if v.ToolChoice == "none" {
 		v.Tools = nil
 	}

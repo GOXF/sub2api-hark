@@ -39,6 +39,12 @@ type RequestLog struct {
 	Outcome    string   `json:"outcome,omitempty"`
 	DurationMS int64    `json:"duration_ms"`
 	ReplyChars int      `json:"reply_chars"`
+	// 工具调用模拟：客户端声明的工具数、实际写进发给 Hark 的消息里的工具数、
+	// 回复里解析出的调用数；ToolsNote 说明声明了却没用上的原因。
+	ToolsDeclared int    `json:"tools_declared"`
+	ToolsSent     int    `json:"tools_sent"`
+	ToolCalls     int    `json:"tool_calls"`
+	ToolsNote     string `json:"tools_note,omitempty"`
 }
 
 // RequestStats summarises the kept request logs.
