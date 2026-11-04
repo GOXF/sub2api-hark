@@ -43,6 +43,7 @@ func (s *Server) normalizeResponses(b []byte) (chatRequest, error) {
 	if len(object) > 64 {
 		return v, inputError("invalid_request", "请求顶层字段过多")
 	}
+	mergeAdditionalTools(object)
 	if err := parseEnvelope(object, &v); err != nil {
 		return v, err
 	}
@@ -290,4 +291,39 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveTurn(w, r, v, newResponsesFormat())
+}
+
+// mergeAdditionalTools 把 input[] 里 additional_tools 项声明的工具并入顶层 tools。
+// Codex 桌面版的 Responses Lite 会发 "tools": null，把工具定义放在
+// {"type":"additional_tools","tools":[...]} 里；不合并的话网关会当成没带工具。
+func mergeAdditionalTools(object map[string]json.RawMessage) {
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(object["input"], &items) != nil {
+		return
+	}
+	var extra []json.RawMessage
+	for _, it := range items {
+		var typ string
+		json.Unmarshal(it["type"], &typ)
+		if typ != "additional_tools" {
+			continue
+		}
+		var tools []json.RawMessage
+		if json.Unmarshal(it["tools"], &tools) == nil {
+			extra = append(extra, tools...)
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	var top []json.RawMessage
+	if raw := bytes.TrimSpace(object["tools"]); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+		if json.Unmarshal(raw, &top) != nil {
+			return // 顶层 tools 格式不对，交给 parseTools 报错
+		}
+	}
+	merged, err := json.Marshal(append(top, extra...))
+	if err == nil {
+		object["tools"] = merged
+	}
 }
