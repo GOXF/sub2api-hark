@@ -122,6 +122,9 @@ linters:
       generated-is-used: true
 
   exclusions:
+    # Hark：hark2api 网关副本（tools/sync-hark2api.sh 同步），按上游原样保留，不在此 lint。
+    paths:
+      - internal/pkg/harkembed/gateway
     rules:
       # x/net v0.60 deprecated the HTTP/2 compatibility adapters. Keep their
       # existing per-protocol idle timeout and PING configuration in this CI fix.
@@ -143,6 +146,9 @@ linters:
 formatters:
   enable:
     - gofmt
+  exclusions:
+    paths:
+      - internal/pkg/harkembed/gateway
   settings:
     gofmt:
       # Simplify code: gofmt with `-s` option.
