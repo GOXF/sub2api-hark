@@ -16,7 +16,7 @@ Hark（hark.com）网页账号像其它 API Key 账号一样在 sub2api 里导�
 
 ## 导入账号
 
-在「账号 → 导入」上传 `sub2api-data` 格式 JSON（HarkHubGo 可直接导出），或手动新建：
+在「账号 → 导入」上传 `sub2api-data` 格式 JSON（HarkHubGo 2.0.23+ 或 hark2api 的账号管理页点「导出到 sub2api」即得，Cookie、UA、代理都会带上；注意文件等同密码），或手动新建：
 平台选 Hark，API Key 粘贴 Cookie。
 
 ```json
