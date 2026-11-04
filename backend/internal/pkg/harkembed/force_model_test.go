@@ -60,7 +60,11 @@ func TestForceHarkModelRewritesEveryEntry(t *testing.T) {
 				t.Fatalf("%s: field %s = %s, want %s", tc.path, k, have[k].Raw, v.Raw)
 			}
 		}
-		if len(have) != len(want) && !(len(have) == len(want)+1 && !gjson.Get(tc.body, "model").Exists()) {
+		wantLen := len(want)
+		if !gjson.Get(tc.body, "model").Exists() {
+			wantLen++ // model is added when the body had none
+		}
+		if len(have) != wantLen {
 			t.Fatalf("%s: fields changed: %s", tc.path, got)
 		}
 	}
