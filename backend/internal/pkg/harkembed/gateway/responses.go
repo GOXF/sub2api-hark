@@ -102,19 +102,23 @@ func (s *Server) normalizeResponses(b []byte) (chatRequest, error) {
 			case typ == "input_text" || typ == "input_image" || typ == "input_file" || typ == "text" || typ == "image_url" || typ == "file":
 				b, _ := json.Marshal(item)
 				loose = append(loose, b)
-			case typ == "function_call_output":
+			case typ == "function_call_output" || typ == "custom_tool_call_output" || typ == "local_shell_call_output":
 				if err := flush(); err != nil {
 					return v, err
 				}
 				var output, callID string
 				if json.Unmarshal(item["output"], &output) != nil {
-					output = string(item["output"])
+					if t, _, err := s.parseContent(item["output"]); err == nil && t != "" {
+						output = t
+					} else {
+						output = string(item["output"])
+					}
 				}
 				json.Unmarshal(item["call_id"], &callID)
 				m := chatMessage{Role: "tool", Content: "[call_id=" + callID + "]\n" + output}
 				m.Hash = messageHash(m, nil)
 				v.Messages = append(v.Messages, m)
-			case typ == "function_call":
+			case typ == "function_call" || typ == "custom_tool_call" || typ == "local_shell_call":
 				if err := flush(); err != nil {
 					return v, err
 				}
@@ -147,50 +151,134 @@ func (s *Server) normalizeResponses(b []byte) (chatRequest, error) {
 type responsesFormat struct {
 	id, messageID string
 	created       int64
+	msgOpen       bool // 流式：message 项已经开始
 }
 
 func newResponsesFormat() *responsesFormat {
 	return &responsesFormat{id: randomID("resp_"), messageID: randomID("msg_"), created: time.Now().Unix()}
 }
 
-func (f *responsesFormat) envelope(status, text string) map[string]any {
+func (f *responsesFormat) messageItem(status, text string) map[string]any {
+	content := []any{}
+	if text != "" || status == "completed" {
+		content = append(content, map[string]any{"type": "output_text", "text": text, "annotations": []any{}})
+	}
+	return map[string]any{"type": "message", "id": f.messageID, "role": "assistant", "status": status, "content": content}
+}
+
+// toolItem 一次工具调用对应的 Responses 输出项。
+func toolItem(c toolCall) map[string]any {
+	switch c.Kind {
+	case "custom":
+		return map[string]any{"type": "custom_tool_call", "id": "ctc_" + c.ID[5:], "call_id": c.ID, "name": c.Name, "input": c.Arguments, "status": "completed"}
+	case "local_shell":
+		return map[string]any{"type": "local_shell_call", "id": "lsh_" + c.ID[5:], "call_id": c.ID, "status": "completed", "action": localShellAction(c.Arguments)}
+	default:
+		item := map[string]any{"type": "function_call", "id": "fc_" + c.ID[5:], "call_id": c.ID, "name": c.Name, "arguments": c.Arguments, "status": "completed"}
+		if c.Namespace != "" {
+			item["namespace"] = c.Namespace
+		}
+		return item
+	}
+}
+
+func (f *responsesFormat) outputItems(status, text string, calls []toolCall) []any {
+	items := []any{}
 	itemStatus := "in_progress"
 	if status == "completed" {
 		itemStatus = "completed"
 	}
-	content := []any{}
-	if text != "" {
-		content = append(content, map[string]any{"type": "output_text", "text": text, "annotations": []any{}})
+	if text != "" || len(calls) == 0 {
+		items = append(items, f.messageItem(itemStatus, text))
+	}
+	for _, c := range calls {
+		items = append(items, toolItem(c))
+	}
+	return items
+}
+
+func (f *responsesFormat) envelope(status, text string, calls []toolCall) map[string]any {
+	output := []any{}
+	if status != "in_progress" || text != "" {
+		output = f.outputItems(status, text, calls)
 	}
 	return map[string]any{"id": f.id, "object": "response", "created_at": f.created, "status": status, "model": "hark",
-		"output":      []any{map[string]any{"type": "message", "id": f.messageID, "role": "assistant", "status": itemStatus, "content": content}},
+		"output":      output,
 		"output_text": text,
 		"usage":       map[string]int{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
 }
-func (f *responsesFormat) json(res *turnResult) any { return f.envelope("completed", res.Text) }
+func (f *responsesFormat) json(res *turnResult) any {
+	return f.envelope("completed", res.Text, res.ToolCalls)
+}
 func (f *responsesFormat) start(emit func(string, any)) {
-	emit("response.created", map[string]any{"type": "response.created", "response": f.envelope("in_progress", "")})
+	emit("response.created", map[string]any{"type": "response.created", "response": f.envelope("in_progress", "", nil)})
+	emit("response.in_progress", map[string]any{"type": "response.in_progress", "response": f.envelope("in_progress", "", nil)})
+}
+func (f *responsesFormat) openMessage(emit func(string, any)) {
+	if f.msgOpen {
+		return
+	}
+	f.msgOpen = true
 	emit("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 0,
 		"item": map[string]any{"id": f.messageID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
 	emit("response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": f.messageID, "output_index": 0, "content_index": 0,
 		"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 }
 func (f *responsesFormat) delta(emit func(string, any), text string) {
+	if text == "" {
+		return
+	}
+	f.openMessage(emit)
 	emit("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "item_id": f.messageID, "output_index": 0, "content_index": 0, "delta": text})
 }
-func (f *responsesFormat) finish(emit func(string, any), full string) {
-	emit("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": f.messageID, "output_index": 0, "content_index": 0, "text": full})
-	emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 0,
-		"item": map[string]any{"id": f.messageID, "type": "message", "role": "assistant", "status": "completed",
-			"content": []any{map[string]any{"type": "output_text", "text": full, "annotations": []any{}}}}})
-	emit("response.completed", map[string]any{"type": "response.completed", "response": f.envelope("completed", full)})
+func (f *responsesFormat) finish(emit func(string, any), full string, calls []toolCall) {
+	idx := 0
+	if full != "" || len(calls) == 0 {
+		f.openMessage(emit)
+		emit("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": f.messageID, "output_index": 0, "content_index": 0, "text": full})
+		emit("response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": f.messageID, "output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": full, "annotations": []any{}}})
+		emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 0, "item": f.messageItem("completed", full)})
+		idx = 1
+	}
+	for i, c := range calls {
+		item := toolItem(c)
+		added := map[string]any{}
+		for k, v := range item {
+			added[k] = v
+		}
+		added["status"] = "in_progress"
+		switch c.Kind {
+		case "custom":
+			added["input"] = ""
+		case "function":
+			added["arguments"] = ""
+		}
+		emit("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": idx + i, "item": added})
+		switch c.Kind {
+		case "function":
+			emit("response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "item_id": item["id"], "output_index": idx + i, "delta": c.Arguments})
+			emit("response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": item["id"], "output_index": idx + i, "arguments": c.Arguments})
+		case "custom":
+			emit("response.custom_tool_call_input.delta", map[string]any{"type": "response.custom_tool_call_input.delta", "item_id": item["id"], "output_index": idx + i, "delta": c.Arguments})
+			emit("response.custom_tool_call_input.done", map[string]any{"type": "response.custom_tool_call_input.done", "item_id": item["id"], "output_index": idx + i, "input": c.Arguments})
+		}
+		emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": idx + i, "item": item})
+	}
+	emit("response.completed", map[string]any{"type": "response.completed", "response": f.envelope("completed", full, calls)})
 }
 func (f *responsesFormat) failure(emit func(string, any), code, message string) {
-	env := f.envelope("failed", "")
+	env := f.envelope("failed", "", nil)
+	env["output"] = []any{}
 	env["error"] = map[string]string{"code": code, "message": message}
 	emit("response.failed", map[string]any{"type": "response.failed", "response": env})
 }
 func (f *responsesFormat) done() bool { return false }
+
+// keepalive Codex 的空闲超时只认真正的事件（SSE 注释行不算），所以发 response.in_progress。
+func (f *responsesFormat) keepalive(emit func(string, any)) {
+	emit("response.in_progress", map[string]any{"type": "response.in_progress", "response": f.envelope("in_progress", "", nil)})
+}
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {

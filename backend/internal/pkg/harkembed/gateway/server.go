@@ -350,6 +350,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/models", s.models)
 	m.HandleFunc("POST /v1/chat/completions", s.trackRequest(s.chat))
 	m.HandleFunc("POST /v1/responses", s.trackRequest(s.responses))
+	m.HandleFunc("POST /v1/messages", s.trackRequest(s.messages))
+	m.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	m.HandleFunc("POST /v1/sessions/{id}/end", s.endSession)
 	m.HandleFunc("GET /v1/media/{name}", s.serveMedia)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -658,8 +660,8 @@ func (s *Server) authorized(r *http.Request) bool {
 	if _, ok := embeddedAccount(r.Context()); ok && s.embed != nil {
 		return true
 	}
-	value := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if value == "" || value == r.Header.Get("Authorization") {
+	value := requestAPIKey(r)
+	if value == "" {
 		return false
 	}
 	h := sha256.Sum256([]byte(value))
@@ -674,6 +676,20 @@ func (s *Server) authorized(r *http.Request) bool {
 	}
 	return false
 }
+
+// requestAPIKey 客户端的 API Key：Authorization: Bearer；Anthropic 接口（/v1/messages）
+// 另外接受 x-api-key 头（Claude Code 用 ANTHROPIC_API_KEY 时发这个）。
+func requestAPIKey(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if value := strings.TrimPrefix(auth, "Bearer "); value != "" && value != auth {
+		return value
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+		return strings.TrimSpace(r.Header.Get("X-Api-Key"))
+	}
+	return ""
+}
+
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
 		fail(w, 401, "invalid_api_key", "API Key 无效")

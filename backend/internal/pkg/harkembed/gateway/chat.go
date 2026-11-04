@@ -23,9 +23,10 @@ type turnResult struct {
 	Files     int
 	Isolation string
 
-	Text     string
-	Outcome  string
-	Archived bool
+	Text      string
+	ToolCalls []toolCall // 从回复里解析出的客户端工具调用（tools.go）
+	Outcome   string
+	Archived  bool
 
 	// For the request log.
 	AccountID   string
@@ -72,6 +73,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 		return err
 	}
 	text, files := renderTurn(plan.send)
+	text += toolPrompt(v.Tools, v.ToolChoice)
 	if len(files) > maxFilesPerRequest {
 		return &statusInputError{400, "too_many_files", fmt.Sprintf("单轮最多上传 %d 个附件", maxFilesPerRequest)}
 	}
@@ -280,9 +282,14 @@ type outputFormat interface {
 	json(res *turnResult) any
 	start(emit func(event string, v any))
 	delta(emit func(event string, v any), text string)
-	finish(emit func(event string, v any), full string)
+	finish(emit func(event string, v any), full string, calls []toolCall)
 	failure(emit func(event string, v any), code, message string)
 	done() bool // whether to send "data: [DONE]"
+}
+
+// errorFormat 输出格式自带错误体（Anthropic 的 {"type":"error",...}）时实现。
+type errorFormat interface {
+	errorBody(status int, code, message string) any
 }
 
 func setTurnHeaders(w http.ResponseWriter, res *turnResult) {
@@ -311,6 +318,9 @@ func commonPrefix(a, b string) int {
 
 func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest, format outputFormat) {
 	w.Header().Set("X-Hark-Context-Isolation", "instruction-only")
+	if s.forwardExtra {
+		v.Tools = nil // 原样转发 tools 给 Hark（ForwardExtra），不做工具调用模拟
+	}
 	s.mu.Lock()
 	timeout := s.settings.Timeout
 	s.mu.Unlock()
@@ -328,9 +338,10 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	if !v.Stream {
 		err := s.runTurn(ctx, r, v, res, turnHooks{})
 		if err != nil {
-			s.turnFailed(w, r, ctx, err)
+			s.turnFailed(w, r, ctx, err, format)
 			return
 		}
+		s.applyToolCalls(v, res)
 		setTurnHeaders(w, res)
 		w.Header().Set("X-Hark-Project-Archived", strconv.FormatBool(res.Archived))
 		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
@@ -374,12 +385,19 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			if !started {
 				return
 			}
+			if len(v.Tools) > 0 {
+				partial = toolSafePrefix(partial)
+			}
 			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 				format.delta(emit, partial[len(emitted):])
 				emitted = partial
 				return
 			}
 			if time.Since(lastWrite) > 15*time.Second {
+				if ka, ok := format.(interface{ keepalive(func(string, any)) }); ok {
+					ka.keepalive(emit)
+					return
+				}
 				fmt.Fprint(w, ": keepalive\n\n")
 				lastWrite = time.Now()
 				if flusher != nil {
@@ -393,7 +411,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	defer mu.Unlock()
 	if err != nil {
 		if !started {
-			s.turnFailed(w, r, ctx, err)
+			s.turnFailed(w, r, ctx, err, format)
 			return
 		}
 		status, code, message := turnError(ctx, err)
@@ -408,7 +426,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 		}
 		return
 	}
+	s.applyToolCalls(v, res)
 	final := res.Text
+	if len(res.ToolCalls) > 0 && strings.HasPrefix(emitted, final) {
+		final = emitted // 已发出的文字里没有工具块，保持一致
+	}
 	if final != emitted {
 		// Normally the final text extends what was streamed. If Hark rewrote
 		// earlier text, only the part after the common prefix can be sent.
@@ -420,7 +442,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			format.delta(emit, rest)
 		}
 	}
-	format.finish(emit, final)
+	format.finish(emit, final, res.ToolCalls)
 	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 	w.Header().Set("X-Hark-Project-Archived", strconv.FormatBool(res.Archived))
 	if format.done() {
@@ -437,11 +459,15 @@ func (s *Server) logChatFailure(code string) {
 	s.mu.Unlock()
 }
 
-func (s *Server) turnFailed(w http.ResponseWriter, r *http.Request, ctx context.Context, err error) {
+func (s *Server) turnFailed(w http.ResponseWriter, r *http.Request, ctx context.Context, err error, format outputFormat) {
 	status, code, message := turnError(ctx, err)
 	reqRecFrom(r.Context()).update(func(l *RequestLog) { l.Code = code })
 	s.logChatFailure(code)
 	if r.Context().Err() == nil {
+		if ef, ok := format.(errorFormat); ok {
+			write(w, status, ef.errorBody(status, code, message))
+			return
+		}
 		fail(w, status, code, message)
 	}
 }
@@ -459,9 +485,36 @@ func (f *chatFormat) chunk(delta map[string]any, finish any) map[string]any {
 	return map[string]any{"id": f.id, "object": "chat.completion.chunk", "created": f.created, "model": "hark", "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}}
 }
 func (f *chatFormat) json(res *turnResult) any {
+	msg := map[string]any{"role": "assistant", "content": res.Text}
+	finish := "stop"
+	if len(res.ToolCalls) > 0 {
+		msg["tool_calls"] = chatToolCalls(res.ToolCalls, false)
+		if res.Text == "" {
+			msg["content"] = nil
+		}
+		finish = "tool_calls"
+	}
 	return map[string]any{"id": f.id, "object": "chat.completion", "created": f.created, "model": "hark",
-		"choices": []any{map[string]any{"index": 0, "message": map[string]string{"role": "assistant", "content": res.Text}, "finish_reason": "stop"}},
+		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finish}},
 		"usage":   map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+}
+
+// chatToolCalls Chat Completions 的 tool_calls（custom 工具的输入放进 {"input": ...}）。
+func chatToolCalls(calls []toolCall, indexed bool) []any {
+	out := make([]any, 0, len(calls))
+	for i, c := range calls {
+		args := c.Arguments
+		if c.Kind == "custom" {
+			b, _ := json.Marshal(map[string]string{"input": c.Arguments})
+			args = string(b)
+		}
+		tc := map[string]any{"id": c.ID, "type": "function", "function": map[string]any{"name": c.Name, "arguments": args}}
+		if indexed {
+			tc["index"] = i
+		}
+		out = append(out, tc)
+	}
+	return out
 }
 func (f *chatFormat) start(emit func(string, any)) {
 	emit("", f.chunk(map[string]any{"role": "assistant", "content": ""}, nil))
@@ -469,7 +522,12 @@ func (f *chatFormat) start(emit func(string, any)) {
 func (f *chatFormat) delta(emit func(string, any), text string) {
 	emit("", f.chunk(map[string]any{"content": text}, nil))
 }
-func (f *chatFormat) finish(emit func(string, any), full string) {
+func (f *chatFormat) finish(emit func(string, any), full string, calls []toolCall) {
+	if len(calls) > 0 {
+		emit("", f.chunk(map[string]any{"tool_calls": chatToolCalls(calls, true)}, nil))
+		emit("", f.chunk(map[string]any{}, "tool_calls"))
+		return
+	}
 	emit("", f.chunk(map[string]any{}, "stop"))
 }
 func (f *chatFormat) failure(emit func(string, any), code, message string) {
@@ -513,4 +571,17 @@ func (s *Server) validate(w http.ResponseWriter, r *http.Request) {
 	s.event("success", "校验请求", "请求格式通过；未发送到 Hark")
 	s.mu.Unlock()
 	write(w, 200, map[string]any{"valid": true, "upstream_sent": false, "messages": len(v.Messages), "files": files, "message": "请求格式正确；此处仅校验，请使用 API Key 调用聊天接口。"})
+}
+
+// applyToolCalls 请求带了 tools 时，把回复里的 <tool_call> 块解析成工具调用。
+func (s *Server) applyToolCalls(v chatRequest, res *turnResult) {
+	if len(v.Tools) == 0 {
+		return
+	}
+	res.Text, res.ToolCalls = extractToolCalls(res.Text, v.Tools)
+	if len(res.ToolCalls) > 0 {
+		s.mu.Lock()
+		s.event("info", "工具调用", toolNames(res.ToolCalls))
+		s.mu.Unlock()
+	}
 }

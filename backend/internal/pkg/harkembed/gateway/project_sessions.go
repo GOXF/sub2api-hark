@@ -46,7 +46,11 @@ func sessionNamespace(r *http.Request) string {
 		return "embed:" + a.ID
 	}
 	if strings.HasPrefix(r.URL.Path, "/v1/") {
-		h := sha256.Sum256([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")))
+		key := requestAPIKey(r)
+		if key == "" {
+			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		h := sha256.Sum256([]byte(key))
 		return "api:" + hex.EncodeToString(h[:])
 	}
 	return "admin-playground"

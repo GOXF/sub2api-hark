@@ -60,7 +60,10 @@ type chatRequest struct {
 	SessionEnd bool          `json:"session_end,omitempty"`
 	// Bridge asks for an account whose local file bridge is on (hark_bridge
 	// in the body or X-Hark-Bridge: true). It only affects new sessions.
-	Bridge       bool            `json:"hark_bridge,omitempty"`
+	Bridge bool `json:"hark_bridge,omitempty"`
+	// Tools / ToolChoice：客户端声明的工具（见 tools.go 的工具调用模拟）。
+	Tools        []toolSpec      `json:"-"`
+	ToolChoice   string          `json:"-"`
 	OriginalBody json.RawMessage `json:"-"`
 	extra        map[string]json.RawMessage
 }
@@ -155,7 +158,7 @@ func (s *Server) bodyReadError(w http.ResponseWriter, err error) {
 }
 
 func applySessionHeaders(r *http.Request, v *chatRequest) error {
-	for _, name := range []string{"X-Hark-Session-Id", "X-Session-Id"} {
+	for _, name := range []string{"X-Hark-Session-Id", "X-Session-Id", "Session_id", "Session-Id"} {
 		if values, ok := r.Header[name]; ok {
 			if len(values) != 1 {
 				return inputError("invalid_session", name+" 只能设置一次")
@@ -287,6 +290,24 @@ func parseEnvelope(object map[string]json.RawMessage, v *chatRequest) error {
 	if raw, ok := object["hark_bridge"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		if json.Unmarshal(raw, &v.Bridge) != nil {
 			return inputError("invalid_bridge", "hark_bridge 必须是布尔值")
+		}
+	}
+	tools, err := parseTools(object["tools"])
+	if err != nil {
+		return err
+	}
+	v.Tools = tools
+	v.ToolChoice = parseToolChoice(object["tool_choice"])
+	if v.ToolChoice == "none" {
+		v.Tools = nil
+	}
+	if v.SessionID == "" {
+		// Codex 等客户端用 prompt_cache_key 标识同一个对话：当作 session_id，复用同一个 Project。
+		var key string
+		if json.Unmarshal(object["prompt_cache_key"], &key) == nil {
+			if key = strings.TrimSpace(key); key != "" && len(key) <= 256 {
+				v.SessionID = key
+			}
 		}
 	}
 	for _, name := range []string{"conversationId", "idempotencyKey", "responseMessageId", "message", "attachments", "expectedUserId"} {
