@@ -71,6 +71,27 @@ func get() (*gateway.Server, error) {
 type Credential struct {
 	Cookie    string `json:"cookie"`
 	UserAgent string `json:"user_agent"`
+	// Timezone optionally overrides the IANA time zone sent to Hark for this
+	// account (see DefaultTimezone).
+	Timezone string `json:"timezone"`
+}
+
+// DefaultTimezone is the IANA time zone sent to Hark when creating projects
+// and messages, unless the account credential or HARK_TIMEZONE sets one.
+// Hark sits behind Cloudflare, which answers 403 "Attention Required" to
+// POST /api/conversations whose timezone does not fit the egress IP (the
+// embedded gateway's own default, Asia/Shanghai, is blocked from US exits;
+// hark2api at hark.fanjj.com is configured with America/Los_Angeles).
+const DefaultTimezone = "America/Los_Angeles"
+
+// accountTimezone picks the time zone for one account's Hark requests.
+func accountTimezone(cred Credential) string {
+	for _, tz := range []string{cred.Timezone, os.Getenv("HARK_TIMEZONE")} {
+		if tz = strings.TrimSpace(tz); tz != "" && gateway.ValidTimezone(tz) {
+			return tz
+		}
+	}
+	return DefaultTimezone
 }
 
 // ParseCredential reads a Hark account API key.
@@ -79,7 +100,7 @@ func ParseCredential(key string) Credential {
 	if strings.HasPrefix(key, "{") {
 		var c Credential
 		if json.Unmarshal([]byte(key), &c) == nil {
-			c.Cookie, c.UserAgent = strings.TrimSpace(c.Cookie), strings.TrimSpace(c.UserAgent)
+			c.Cookie, c.UserAgent, c.Timezone = strings.TrimSpace(c.Cookie), strings.TrimSpace(c.UserAgent), strings.TrimSpace(c.Timezone)
 			return c
 		}
 	}
@@ -109,6 +130,7 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 		Cookie:    cred.Cookie,
 		UserAgent: cred.UserAgent,
 		Proxy:     strings.TrimSpace(proxyURL),
+		Timezone:  accountTimezone(cred),
 	}
 	in := req.Clone(gateway.WithEmbeddedAccount(req.Context(), acc))
 	in.Header.Del("Authorization")
