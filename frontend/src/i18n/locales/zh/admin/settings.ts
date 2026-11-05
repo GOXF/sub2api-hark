@@ -557,6 +557,8 @@ export default {
         harkModelLabelPrompt: 'Hark 模型标注提示词',
         harkModelLabelPromptPlaceholder: '留空时使用内置默认说明。',
         harkModelLabelPromptHint: "{'{'}model{'}'} 会替换为客户端原始请求的模型名。清空后恢复内置默认说明。",
+        harkUsageEstimate: 'Hark Token 用量估算',
+        harkUsageEstimateHint: 'Hark 上游不返回 Token 用量。开启后，Hark 账号响应的用量为 0 时，按请求文本（消息、系统提示词、工具定义）与生成的回复文本用分词器估算输入 / 输出 Token，据此按模型价格 × 分组倍率记录用量与费用；上游返回的非零用量不会被覆盖。仅为估算，与 Hark 实际消耗的额度不一定一致；图片和文件不计入。默认开启；环境变量 HARK_USAGE_ESTIMATE=off 可强制关闭。',
         systemBlockTitle: 'System Block {index}',
         systemBlockPreset: '预设',
         systemBlockPresetBilling: 'Billing Header',

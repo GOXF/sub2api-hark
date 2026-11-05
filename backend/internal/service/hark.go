@@ -74,3 +74,13 @@ func withHarkRequestedModel(req *http.Request, settings *SettingService) *http.R
 	}
 	return req.WithContext(ctx)
 }
+
+// withHarkUsageEstimate 在后台关闭 enable_hark_usage_estimate 时给发往 Hark 账号的
+// 上游请求挂上 ctxkey.HarkUsageEstimateDisabled，harkembed 据此不估算 Token；
+// 默认开启时原样返回（Hark 上游不返回用量，harkembed 只替换为零的用量）。
+func withHarkUsageEstimate(req *http.Request, settings *SettingService) *http.Request {
+	if req == nil || settings == nil || settings.GetHarkUsageEstimateEnabled(req.Context()) {
+		return req
+	}
+	return req.WithContext(context.WithValue(req.Context(), ctxkey.HarkUsageEstimateDisabled, true))
+}

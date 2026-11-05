@@ -142,10 +142,20 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 	if err := forceHarkModel(in); err != nil {
 		return nil, fmt.Errorf("hark gateway: read request body: %w", err)
 	}
+	// The client's request as sent (after the model rewrite, before the
+	// identity note) is what the estimated input usage is counted from.
+	var usageBody []byte
+	if usageEstimateEnabled(in) && labelFormatOf(in.URL.Path) != labelNone {
+		usageBody = requestBodyBytes(in)
+	}
 	if err := injectModelLabel(in); err != nil {
 		return nil, fmt.Errorf("hark gateway: read request body: %w", err)
 	}
-	return serve(s.EmbeddedHandler(), in), nil
+	resp := serve(s.EmbeddedHandler(), in)
+	if usageBody != nil {
+		resp = withUsageEstimate(in, usageBody, resp)
+	}
+	return resp, nil
 }
 
 // Model is the only model name the Hark gateway accepts.

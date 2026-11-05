@@ -245,6 +245,7 @@ type SystemSettings struct {
 	ClaudeOAuthSystemPromptBlocks          string // Claude OAuth mimic 路径注入的 system blocks JSON 配置；空值使用内置默认
 	EnableHarkModelLabel                   bool   // 是否为 Hark 账号请求注入如实的模型身份说明（默认 true）
 	HarkModelLabelPrompt                   string // Hark 模型身份说明模板，{model} 为客户端原始请求模型；空值使用内置默认
+	EnableHarkUsageEstimate                bool   // 是否为 Hark 账号零用量响应估算 Token（默认 true）
 	EnableAnthropicCacheTTL1hInjection     bool   // 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 false）
 	EnableClientDatelineNormalization      bool   // 是否对 Anthropic OAuth/SetupToken 请求体做客户端 dateline 归一化（默认 true）
 	RewriteMessageCacheControl             bool   // 是否改写 messages[*].content[*].cache_control（默认 false）

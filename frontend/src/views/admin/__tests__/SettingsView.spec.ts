@@ -475,6 +475,7 @@ const baseSettingsResponse = {
   claude_oauth_system_prompt_blocks: "",
   enable_hark_model_label: true,
   hark_model_label_prompt: "",
+  enable_hark_usage_estimate: true,
   enable_anthropic_cache_ttl_1h_injection: false,
   rewrite_message_cache_control: false,
   enable_client_dateline_normalization: true,

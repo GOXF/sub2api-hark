@@ -564,6 +564,8 @@ export default {
         harkModelLabelPrompt: 'Hark Model Label Prompt',
         harkModelLabelPromptPlaceholder: 'Leave empty to use the built-in note.',
         harkModelLabelPromptHint: "{'{'}model{'}'} is replaced with the model the client originally requested. Clear it to restore the built-in note.",
+        harkUsageEstimate: 'Hark Token Usage Estimate',
+        harkUsageEstimateHint: 'Hark does not report token usage. When enabled and a Hark account response reports zero usage, input/output tokens are estimated with a tokenizer from the request text (messages, system prompt, tool definitions) and the generated reply, and usage and cost are recorded from the model price × group rate. Non-zero usage from upstream is never overwritten. This is an estimate only and may differ from the quota Hark actually consumes; images and files are not counted. Enabled by default; env HARK_USAGE_ESTIMATE=off forces it off.',
         systemBlockTitle: 'System Block {index}',
         systemBlockPreset: 'Preset',
         systemBlockPresetBilling: 'Billing header',

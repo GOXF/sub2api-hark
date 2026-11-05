@@ -298,6 +298,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		ClaudeOAuthSystemPromptBlocks:                          settings.ClaudeOAuthSystemPromptBlocks,
 		EnableHarkModelLabel:                                   settings.EnableHarkModelLabel,
 		HarkModelLabelPrompt:                                   settings.HarkModelLabelPrompt,
+		EnableHarkUsageEstimate:                                settings.EnableHarkUsageEstimate,
 		EnableAnthropicCacheTTL1hInjection:                     settings.EnableAnthropicCacheTTL1hInjection,
 		RewriteMessageCacheControl:                             settings.RewriteMessageCacheControl,
 		EnableClientDatelineNormalization:                      settings.EnableClientDatelineNormalization,

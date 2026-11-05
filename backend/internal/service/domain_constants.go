@@ -690,6 +690,8 @@ const (
 	SettingKeyEnableHarkModelLabel = "enable_hark_model_label"
 	// SettingKeyHarkModelLabelPrompt Hark 模型身份说明模板，{model} 替换为客户端原始请求模型（空值使用内置默认）
 	SettingKeyHarkModelLabelPrompt = "hark_model_label_prompt"
+	// SettingKeyEnableHarkUsageEstimate 是否为 Hark 账号零用量响应估算 Token（Hark 上游不返回用量，默认 true）
+	SettingKeyEnableHarkUsageEstimate = "enable_hark_usage_estimate"
 	// SettingKeyEnableAnthropicCacheTTL1hInjection 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 false）
 	SettingKeyEnableAnthropicCacheTTL1hInjection = "enable_anthropic_cache_ttl_1h_injection"
 	// SettingKeyEnableClientDatelineNormalization 是否对 Anthropic OAuth/SetupToken 账号

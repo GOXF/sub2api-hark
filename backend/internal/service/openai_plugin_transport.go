@@ -17,6 +17,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	}
 	if account.IsHark() {
 		request = withHarkRequestedModel(request, s.settingService)
+		request = withHarkUsageEstimate(request, s.settingService)
 	}
 	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
 }
