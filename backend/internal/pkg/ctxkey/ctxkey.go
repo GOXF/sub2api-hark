@@ -17,6 +17,14 @@ const (
 	// RequestedPublicModel 是客户端原始请求中的公开模型名。
 	RequestedPublicModel Key = "ctx_requested_public_model"
 
+	// HarkRequestedModel 是 Hark 账号请求中客户端原始选择的模型名（映射到 "hark" 之前），
+	// 由 OpenAI 网关在把请求交给进程内 Hark 网关前设置，harkembed 据此如实标注模型身份。
+	HarkRequestedModel Key = "ctx_hark_requested_model"
+
+	// HarkModelLabelPrompt 是后台设置的 Hark 模型身份说明模板（{model} 为原始请求模型），
+	// 空值或缺失时 harkembed 使用内置默认。
+	HarkModelLabelPrompt Key = "ctx_hark_model_label_prompt"
+
 	// CompositeRouteSource 标识 composite 解析结果来自显式路由还是内置模型探测。
 	CompositeRouteSource Key = "ctx_composite_route_source"
 

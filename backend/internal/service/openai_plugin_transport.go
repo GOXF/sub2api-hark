@@ -15,6 +15,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 			return response, err
 		}
 	}
+	if account.IsHark() {
+		request = withHarkRequestedModel(request, s.settingService)
+	}
 	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
 }
 

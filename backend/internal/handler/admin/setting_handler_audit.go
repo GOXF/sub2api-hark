@@ -470,6 +470,12 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.ClaudeOAuthSystemPromptBlocks != after.ClaudeOAuthSystemPromptBlocks {
 		changed = append(changed, "claude_oauth_system_prompt_blocks")
 	}
+	if before.EnableHarkModelLabel != after.EnableHarkModelLabel {
+		changed = append(changed, "enable_hark_model_label")
+	}
+	if before.HarkModelLabelPrompt != after.HarkModelLabelPrompt {
+		changed = append(changed, "hark_model_label_prompt")
+	}
 	if before.EnableAnthropicCacheTTL1hInjection != after.EnableAnthropicCacheTTL1hInjection {
 		changed = append(changed, "enable_anthropic_cache_ttl_1h_injection")
 	}
