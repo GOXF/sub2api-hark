@@ -172,22 +172,22 @@ func labelBody(body []byte, format labelFormat, note string) ([]byte, bool) {
 		}
 		sys, _ := sjson.Set(`{"role":"system"}`, "content", note)
 		var buf bytes.Buffer
-		buf.WriteByte('[')
+		_ = buf.WriteByte('[')
 		for i := 0; i <= len(items); i++ {
 			if i == at {
 				if buf.Len() > 1 {
-					buf.WriteByte(',')
+					_ = buf.WriteByte(',')
 				}
-				buf.WriteString(sys)
+				_, _ = buf.WriteString(sys)
 			}
 			if i < len(items) {
 				if buf.Len() > 1 {
-					buf.WriteByte(',')
+					_ = buf.WriteByte(',')
 				}
-				buf.WriteString(items[i].Raw)
+				_, _ = buf.WriteString(items[i].Raw)
 			}
 		}
-		buf.WriteByte(']')
+		_ = buf.WriteByte(']')
 		out, err := sjson.SetRawBytes(body, "messages", buf.Bytes())
 		return out, err == nil
 	case labelResponses:
