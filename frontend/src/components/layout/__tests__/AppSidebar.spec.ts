@@ -9,15 +9,6 @@ const componentSource = readFileSync(componentPath, 'utf8')
 const stylePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../style.css')
 const styleSource = readFileSync(stylePath, 'utf8')
 
-describe('AppSidebar Apple ID entry', () => {
-  it('adds a standalone admin link without replacing the account link', () => {
-    const adminNavigation = componentSource.slice(componentSource.indexOf('const adminNavItems ='))
-    expect(adminNavigation).toContain("path: '/admin/appleid', label: t('appleid.title')")
-    expect(adminNavigation).toContain("path: '/admin/accounts', label: t('nav.accounts')")
-    expect(componentSource.slice(0, componentSource.indexOf('const adminNavItems ='))).not.toContain("path: '/admin/appleid'")
-  })
-})
-
 describe('AppSidebar custom SVG styles', () => {
   it('does not override uploaded SVG fill or stroke colors', () => {
     expect(componentSource).toContain('.sidebar-svg-icon {')

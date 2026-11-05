@@ -422,18 +422,6 @@ const routes: RouteRecordRaw[] = [
 
   // ==================== Admin Routes ====================
   {
-    path: '/admin/appleid',
-    name: 'AdminAppleID',
-    component: () => import('@/views/admin/AppleIDView.vue'),
-    meta: {
-      requiresAuth: true,
-      requiresAdmin: true,
-      title: 'Apple ID Workbench',
-      titleKey: 'appleid.title',
-      descriptionKey: 'appleid.description'
-    }
-  },
-  {
     path: '/admin',
     redirect: '/admin/dashboard'
   },
