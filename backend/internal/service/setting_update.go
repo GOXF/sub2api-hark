@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/harkembed"
 )
 
 // OmittedSettingKeys marks setting keys the caller's payload never carried.
@@ -482,6 +483,13 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		return nil, err
 	}
 	updates[SettingKeyClaudeOAuthSystemPromptBlocks] = settings.ClaudeOAuthSystemPromptBlocks
+	updates[SettingKeyEnableHarkModelLabel] = strconv.FormatBool(settings.EnableHarkModelLabel)
+	// 与内置默认相同时存空值，内置默认更新后随之生效。
+	harkModelLabelPrompt := settings.HarkModelLabelPrompt
+	if strings.TrimSpace(harkModelLabelPrompt) == strings.TrimSpace(harkembed.DefaultModelLabelPrompt) {
+		harkModelLabelPrompt = ""
+	}
+	updates[SettingKeyHarkModelLabelPrompt] = harkModelLabelPrompt
 	updates[SettingKeyEnableAnthropicCacheTTL1hInjection] = strconv.FormatBool(settings.EnableAnthropicCacheTTL1hInjection)
 	updates[SettingKeyRewriteMessageCacheControl] = strconv.FormatBool(settings.RewriteMessageCacheControl)
 	updates[SettingKeyEnableClientDatelineNormalization] = strconv.FormatBool(settings.EnableClientDatelineNormalization)
@@ -724,6 +732,8 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		claudeOAuthSystemPromptInjection: settings.EnableClaudeOAuthSystemPromptInjection,
 		claudeOAuthSystemPrompt:          settings.ClaudeOAuthSystemPrompt,
 		claudeOAuthSystemPromptBlocks:    settings.ClaudeOAuthSystemPromptBlocks,
+		harkModelLabel:                   settings.EnableHarkModelLabel,
+		harkModelLabelPrompt:             settings.HarkModelLabelPrompt,
 		anthropicCacheTTL1hInjection:     settings.EnableAnthropicCacheTTL1hInjection,
 		rewriteMessageCacheControl:       settings.RewriteMessageCacheControl,
 		clientDatelineNormalization:      settings.EnableClientDatelineNormalization,

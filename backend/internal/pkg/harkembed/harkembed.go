@@ -142,6 +142,9 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 	if err := forceHarkModel(in); err != nil {
 		return nil, fmt.Errorf("hark gateway: read request body: %w", err)
 	}
+	if err := injectModelLabel(in); err != nil {
+		return nil, fmt.Errorf("hark gateway: read request body: %w", err)
+	}
 	return serve(s.EmbeddedHandler(), in), nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/harkembed"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
@@ -875,6 +876,14 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 	result.ClaudeOAuthSystemPrompt = settings[SettingKeyClaudeOAuthSystemPrompt]
 	result.ClaudeOAuthSystemPromptBlocks = settings[SettingKeyClaudeOAuthSystemPromptBlocks]
+	result.EnableHarkModelLabel = true
+	if v, ok := settings[SettingKeyEnableHarkModelLabel]; ok && v != "" {
+		result.EnableHarkModelLabel = v == "true"
+	}
+	result.HarkModelLabelPrompt = settings[SettingKeyHarkModelLabelPrompt]
+	if strings.TrimSpace(result.HarkModelLabelPrompt) == "" {
+		result.HarkModelLabelPrompt = harkembed.DefaultModelLabelPrompt
+	}
 	result.EnableAnthropicCacheTTL1hInjection = settings[SettingKeyEnableAnthropicCacheTTL1hInjection] == "true"
 	if v, ok := settings[SettingKeyRewriteMessageCacheControl]; ok && v != "" {
 		result.RewriteMessageCacheControl = v == "true"

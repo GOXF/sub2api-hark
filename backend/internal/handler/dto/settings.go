@@ -209,6 +209,8 @@ type SystemSettings struct {
 	EnableClaudeOAuthSystemPromptInjection bool   `json:"enable_claude_oauth_system_prompt_injection"`
 	ClaudeOAuthSystemPrompt                string `json:"claude_oauth_system_prompt"`
 	ClaudeOAuthSystemPromptBlocks          string `json:"claude_oauth_system_prompt_blocks"`
+	EnableHarkModelLabel                   bool   `json:"enable_hark_model_label"`
+	HarkModelLabelPrompt                   string `json:"hark_model_label_prompt"`
 	EnableAnthropicCacheTTL1hInjection     bool   `json:"enable_anthropic_cache_ttl_1h_injection"`
 	RewriteMessageCacheControl             bool   `json:"rewrite_message_cache_control"`
 	EnableClientDatelineNormalization      bool   `json:"enable_client_dateline_normalization"`

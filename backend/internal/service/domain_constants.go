@@ -686,6 +686,10 @@ const (
 	SettingKeyClaudeOAuthSystemPrompt = "claude_oauth_system_prompt"
 	// SettingKeyClaudeOAuthSystemPromptBlocks Claude OAuth mimic 路径注入的 system blocks JSON 配置（空值使用内置默认）
 	SettingKeyClaudeOAuthSystemPromptBlocks = "claude_oauth_system_prompt_blocks"
+	// SettingKeyEnableHarkModelLabel 是否为 Hark 账号请求注入如实的模型身份说明（默认 true）
+	SettingKeyEnableHarkModelLabel = "enable_hark_model_label"
+	// SettingKeyHarkModelLabelPrompt Hark 模型身份说明模板，{model} 替换为客户端原始请求模型（空值使用内置默认）
+	SettingKeyHarkModelLabelPrompt = "hark_model_label_prompt"
 	// SettingKeyEnableAnthropicCacheTTL1hInjection 是否对 Anthropic OAuth/SetupToken 请求体注入 1h cache_control ttl（默认 false）
 	SettingKeyEnableAnthropicCacheTTL1hInjection = "enable_anthropic_cache_ttl_1h_injection"
 	// SettingKeyEnableClientDatelineNormalization 是否对 Anthropic OAuth/SetupToken 账号

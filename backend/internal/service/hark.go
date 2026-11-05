@@ -1,8 +1,12 @@
 package service
 
 import (
+	"context"
+	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
 // Hark（hark.com）账号：平台 hark、类型 API Key，API Key 填网页登录 Cookie
@@ -23,4 +27,50 @@ func (a *Account) IsHark() bool {
 func isHarkInternalURL(raw string) bool {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && strings.EqualFold(u.Hostname(), "hark.internal") && u.User == nil
+}
+
+// harkClientRequestedModel 返回客户端原始请求的模型名（账号模型映射之前）：handler
+// 解析请求体后写入的 ctxkey.Model，缺失时取 composite 分组记录的公开模型名。
+func harkClientRequestedModel(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	for _, key := range []ctxkey.Key{ctxkey.Model, ctxkey.RequestedPublicModel} {
+		if m, ok := ctx.Value(key).(string); ok {
+			if m = strings.TrimSpace(m); m != "" {
+				return m
+			}
+		}
+	}
+	return ""
+}
+
+// withHarkRequestedModel 把客户端原始模型名（ctxkey.HarkRequestedModel）与后台
+// 设置的说明模板（ctxkey.HarkModelLabelPrompt）挂到发往 Hark 账号的上游请求上，
+// harkembed 据此注入如实的模型身份说明。只用于 Hark 账号；后台关闭
+// enable_hark_model_label、已设置或取不到原始模型时原样返回。
+func withHarkRequestedModel(req *http.Request, settings *SettingService) *http.Request {
+	if req == nil {
+		return req
+	}
+	ctx := req.Context()
+	if m, ok := ctx.Value(ctxkey.HarkRequestedModel).(string); ok && m != "" {
+		return req
+	}
+	model := harkClientRequestedModel(ctx)
+	if model == "" {
+		return req
+	}
+	enabled, prompt := true, ""
+	if settings != nil {
+		enabled, prompt = settings.GetHarkModelLabelSettings(ctx)
+	}
+	if !enabled {
+		return req
+	}
+	ctx = context.WithValue(ctx, ctxkey.HarkRequestedModel, model)
+	if strings.TrimSpace(prompt) != "" {
+		ctx = context.WithValue(ctx, ctxkey.HarkModelLabelPrompt, prompt)
+	}
+	return req.WithContext(ctx)
 }

@@ -250,6 +250,8 @@ type UpdateSettingsRequest struct {
 	EnableClaudeOAuthSystemPromptInjection *bool   `json:"enable_claude_oauth_system_prompt_injection"`
 	ClaudeOAuthSystemPrompt                *string `json:"claude_oauth_system_prompt"`
 	ClaudeOAuthSystemPromptBlocks          *string `json:"claude_oauth_system_prompt_blocks"`
+	EnableHarkModelLabel                   *bool   `json:"enable_hark_model_label"`
+	HarkModelLabelPrompt                   *string `json:"hark_model_label_prompt"`
 	EnableAnthropicCacheTTL1hInjection     *bool   `json:"enable_anthropic_cache_ttl_1h_injection"`
 	RewriteMessageCacheControl             *bool   `json:"rewrite_message_cache_control"`
 	EnableClientDatelineNormalization      *bool   `json:"enable_client_dateline_normalization"`
@@ -1747,6 +1749,18 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.ClaudeOAuthSystemPromptBlocks
 		}(),
+		EnableHarkModelLabel: func() bool {
+			if req.EnableHarkModelLabel != nil {
+				return *req.EnableHarkModelLabel
+			}
+			return previousSettings.EnableHarkModelLabel
+		}(),
+		HarkModelLabelPrompt: func() string {
+			if req.HarkModelLabelPrompt != nil {
+				return *req.HarkModelLabelPrompt
+			}
+			return previousSettings.HarkModelLabelPrompt
+		}(),
 		EnableAnthropicCacheTTL1hInjection: func() bool {
 			if req.EnableAnthropicCacheTTL1hInjection != nil {
 				return *req.EnableAnthropicCacheTTL1hInjection
@@ -2349,6 +2363,8 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		EnableClaudeOAuthSystemPromptInjection:                 updatedSettings.EnableClaudeOAuthSystemPromptInjection,
 		ClaudeOAuthSystemPrompt:                                updatedSettings.ClaudeOAuthSystemPrompt,
 		ClaudeOAuthSystemPromptBlocks:                          updatedSettings.ClaudeOAuthSystemPromptBlocks,
+		EnableHarkModelLabel:                                   updatedSettings.EnableHarkModelLabel,
+		HarkModelLabelPrompt:                                   updatedSettings.HarkModelLabelPrompt,
 		EnableAnthropicCacheTTL1hInjection:                     updatedSettings.EnableAnthropicCacheTTL1hInjection,
 		RewriteMessageCacheControl:                             updatedSettings.RewriteMessageCacheControl,
 		EnableClientDatelineNormalization:                      updatedSettings.EnableClientDatelineNormalization,

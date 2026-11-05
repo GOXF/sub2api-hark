@@ -5,6 +5,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -17,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	adminhandler "github.com/Wei-Shaw/sub2api/internal/handler/admin"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/harkembed"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -25,6 +27,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+// harkModelLabelPromptJSON is the built-in Hark model label template that the
+// settings API reports while no custom prompt is saved.
+var harkModelLabelPromptJSON = func() string {
+	b, _ := json.Marshal(harkembed.DefaultModelLabelPrompt)
+	return string(b)
+}()
 
 func TestAPIContracts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -911,6 +920,8 @@ func TestAPIContracts(t *testing.T) {
 					"enable_claude_oauth_system_prompt_injection": true,
 					"claude_oauth_system_prompt": "",
 					"claude_oauth_system_prompt_blocks": "",
+					"enable_hark_model_label": true,
+					"hark_model_label_prompt": ` + harkModelLabelPromptJSON + `,
 					"enable_anthropic_cache_ttl_1h_injection": false,
 					"rewrite_message_cache_control": false,
 					"enable_client_dateline_normalization": true,
@@ -1230,6 +1241,8 @@ func TestAPIContracts(t *testing.T) {
 					"enable_claude_oauth_system_prompt_injection": true,
 					"claude_oauth_system_prompt": "",
 					"claude_oauth_system_prompt_blocks": "",
+					"enable_hark_model_label": true,
+					"hark_model_label_prompt": ` + harkModelLabelPromptJSON + `,
 					"enable_anthropic_cache_ttl_1h_injection": false,
 					"rewrite_message_cache_control": false,
 					"enable_client_dateline_normalization": true,

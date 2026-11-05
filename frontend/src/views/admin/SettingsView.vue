@@ -5630,6 +5630,50 @@
                 </p>
               </div>
 
+              <!-- Hark 模型标注 -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <label
+                    class="text-sm font-medium text-gray-700 dark:text-gray-300"
+                  >
+                    {{ t("admin.settings.gatewayForwarding.harkModelLabel") }}
+                  </label>
+                  <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                    {{
+                      t("admin.settings.gatewayForwarding.harkModelLabelHint")
+                    }}
+                  </p>
+                </div>
+                <Toggle v-model="form.enable_hark_model_label" />
+              </div>
+
+              <div v-if="form.enable_hark_model_label">
+                <label
+                  class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                >
+                  {{
+                    t("admin.settings.gatewayForwarding.harkModelLabelPrompt")
+                  }}
+                </label>
+                <textarea
+                  v-model="form.hark_model_label_prompt"
+                  rows="6"
+                  class="input w-full resize-y font-mono text-xs leading-5"
+                  :placeholder="
+                    t(
+                      'admin.settings.gatewayForwarding.harkModelLabelPromptPlaceholder',
+                    )
+                  "
+                />
+                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{
+                    t(
+                      "admin.settings.gatewayForwarding.harkModelLabelPromptHint",
+                    )
+                  }}
+                </p>
+              </div>
+
               <!-- Anthropic Cache TTL 1h Injection -->
               <div class="flex items-center justify-between">
                 <div>
@@ -9986,6 +10030,8 @@ const form = reactive<SettingsForm>({
   enable_claude_oauth_system_prompt_injection: true,
   claude_oauth_system_prompt: "",
   claude_oauth_system_prompt_blocks: defaultClaudeOAuthSystemPromptBlocks,
+  enable_hark_model_label: true,
+  hark_model_label_prompt: "",
   enable_anthropic_cache_ttl_1h_injection: false,
   rewrite_message_cache_control: false,
   enable_client_dateline_normalization: true,
@@ -11634,6 +11680,8 @@ async function saveSettings() {
         ? form.claude_oauth_system_prompt
         : "",
       claude_oauth_system_prompt_blocks: claudeOAuthSystemPromptBlocksJSON,
+      enable_hark_model_label: form.enable_hark_model_label,
+      hark_model_label_prompt: form.hark_model_label_prompt ?? "",
       enable_anthropic_cache_ttl_1h_injection:
         form.enable_anthropic_cache_ttl_1h_injection,
       rewrite_message_cache_control: form.rewrite_message_cache_control,

@@ -473,6 +473,8 @@ const baseSettingsResponse = {
   enable_claude_oauth_system_prompt_injection: true,
   claude_oauth_system_prompt: "",
   claude_oauth_system_prompt_blocks: "",
+  enable_hark_model_label: true,
+  hark_model_label_prompt: "",
   enable_anthropic_cache_ttl_1h_injection: false,
   rewrite_message_cache_control: false,
   enable_client_dateline_normalization: true,

@@ -61,6 +61,8 @@ type cachedGatewayForwardingSettings struct {
 	claudeOAuthSystemPromptInjection bool
 	claudeOAuthSystemPrompt          string
 	claudeOAuthSystemPromptBlocks    string
+	harkModelLabel                   bool
+	harkModelLabelPrompt             string
 	anthropicCacheTTL1hInjection     bool
 	rewriteMessageCacheControl       bool
 	clientDatelineNormalization      bool
@@ -861,6 +863,8 @@ type gatewayForwardingSettingsResult struct {
 	fp, mp, cch, claudeOAuthSystemPromptInjection, cacheTTL1h, rewriteMessageCacheControl bool
 	clientDatelineNormalization                                                           bool
 	claudeOAuthSystemPrompt, claudeOAuthSystemPromptBlocks                                string
+	harkModelLabel                                                                        bool
+	harkModelLabelPrompt                                                                  string
 }
 
 func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context) gatewayForwardingSettingsResult {
@@ -874,6 +878,8 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				claudeOAuthSystemPromptInjection: cached.claudeOAuthSystemPromptInjection,
 				claudeOAuthSystemPrompt:          cached.claudeOAuthSystemPrompt,
 				claudeOAuthSystemPromptBlocks:    cached.claudeOAuthSystemPromptBlocks,
+				harkModelLabel:                   cached.harkModelLabel,
+				harkModelLabelPrompt:             cached.harkModelLabelPrompt,
 				cacheTTL1h:                       cached.anthropicCacheTTL1hInjection,
 				rewriteMessageCacheControl:       cached.rewriteMessageCacheControl,
 				clientDatelineNormalization:      cached.clientDatelineNormalization,
@@ -891,6 +897,8 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 					claudeOAuthSystemPromptInjection: cached.claudeOAuthSystemPromptInjection,
 					claudeOAuthSystemPrompt:          cached.claudeOAuthSystemPrompt,
 					claudeOAuthSystemPromptBlocks:    cached.claudeOAuthSystemPromptBlocks,
+					harkModelLabel:                   cached.harkModelLabel,
+					harkModelLabelPrompt:             cached.harkModelLabelPrompt,
 					cacheTTL1h:                       cached.anthropicCacheTTL1hInjection,
 					rewriteMessageCacheControl:       cached.rewriteMessageCacheControl,
 					clientDatelineNormalization:      cached.clientDatelineNormalization,
@@ -907,6 +915,8 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			SettingKeyEnableClaudeOAuthSystemPromptInjection,
 			SettingKeyClaudeOAuthSystemPrompt,
 			SettingKeyClaudeOAuthSystemPromptBlocks,
+			SettingKeyEnableHarkModelLabel,
+			SettingKeyHarkModelLabelPrompt,
 			SettingKeyEnableAnthropicCacheTTL1hInjection,
 			SettingKeyRewriteMessageCacheControl,
 			SettingKeyEnableClientDatelineNormalization,
@@ -919,12 +929,13 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				metadataPassthrough:              false,
 				cchSigning:                       false,
 				claudeOAuthSystemPromptInjection: true,
+				harkModelLabel:                   true,
 				anthropicCacheTTL1hInjection:     false,
 				rewriteMessageCacheControl:       s.defaultRewriteMessageCacheControl(),
 				clientDatelineNormalization:      true,
 				expiresAt:                        time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
 			})
-			return gatewayForwardingSettingsResult{openAITTFTMode: OpenAITTFTModeSemantic, fp: true, claudeOAuthSystemPromptInjection: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
+			return gatewayForwardingSettingsResult{openAITTFTMode: OpenAITTFTModeSemantic, fp: true, claudeOAuthSystemPromptInjection: true, harkModelLabel: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
 		}
 		ttftMode := normalizeOpenAITTFTMode(values[SettingKeyOpenAITTFTMode])
 		fp := true
@@ -939,6 +950,11 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 		}
 		systemPrompt := values[SettingKeyClaudeOAuthSystemPrompt]
 		systemPromptBlocks := values[SettingKeyClaudeOAuthSystemPromptBlocks]
+		harkModelLabel := true
+		if v, ok := values[SettingKeyEnableHarkModelLabel]; ok && v != "" {
+			harkModelLabel = v == "true"
+		}
+		harkModelLabelPrompt := values[SettingKeyHarkModelLabelPrompt]
 		cacheTTL1h := values[SettingKeyEnableAnthropicCacheTTL1hInjection] == "true"
 		rewriteMessageCacheControl := s.defaultRewriteMessageCacheControl()
 		if v, ok := values[SettingKeyRewriteMessageCacheControl]; ok && v != "" {
@@ -956,6 +972,8 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			claudeOAuthSystemPromptInjection: systemPromptInjection,
 			claudeOAuthSystemPrompt:          systemPrompt,
 			claudeOAuthSystemPromptBlocks:    systemPromptBlocks,
+			harkModelLabel:                   harkModelLabel,
+			harkModelLabelPrompt:             harkModelLabelPrompt,
 			anthropicCacheTTL1hInjection:     cacheTTL1h,
 			rewriteMessageCacheControl:       rewriteMessageCacheControl,
 			clientDatelineNormalization:      clientDatelineNormalization,
@@ -969,6 +987,8 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			claudeOAuthSystemPromptInjection: systemPromptInjection,
 			claudeOAuthSystemPrompt:          systemPrompt,
 			claudeOAuthSystemPromptBlocks:    systemPromptBlocks,
+			harkModelLabel:                   harkModelLabel,
+			harkModelLabelPrompt:             harkModelLabelPrompt,
 			cacheTTL1h:                       cacheTTL1h,
 			rewriteMessageCacheControl:       rewriteMessageCacheControl,
 			clientDatelineNormalization:      clientDatelineNormalization,
@@ -977,7 +997,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 	if r, ok := val.(gatewayForwardingSettingsResult); ok {
 		return r
 	}
-	return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, clientDatelineNormalization: true}
+	return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, harkModelLabel: true, clientDatelineNormalization: true}
 }
 
 // GetOpenAITTFTMode 返回 Responses first_token_ms 的统计口径。
@@ -1015,6 +1035,17 @@ func (s *SettingService) IsClientDatelineNormalizationEnabled(ctx context.Contex
 func (s *SettingService) GetClaudeOAuthSystemPromptInjectionSettings(ctx context.Context) (enabled bool, prompt string, blocks string) {
 	result := s.getGatewayForwardingSettingsCached(ctx)
 	return result.claudeOAuthSystemPromptInjection, result.claudeOAuthSystemPrompt, result.claudeOAuthSystemPromptBlocks
+}
+
+// GetHarkModelLabelSettings returns whether Hark accounts get the honest model
+// identity note and its template ({model} = the client's requested model).
+// An empty template means harkembed's built-in default.
+func (s *SettingService) GetHarkModelLabelSettings(ctx context.Context) (enabled bool, prompt string) {
+	if s == nil || s.settingRepo == nil {
+		return true, ""
+	}
+	result := s.getGatewayForwardingSettingsCached(ctx)
+	return result.harkModelLabel, result.harkModelLabelPrompt
 }
 
 // GetClaudeCodeVersionBounds 获取 Claude Code 版本号上下限要求
