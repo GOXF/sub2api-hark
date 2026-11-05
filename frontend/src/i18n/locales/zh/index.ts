@@ -1,4 +1,5 @@
 import adminAccessKeys from './adminAccessKeys'
+import appleid from './appleid'
 import mcp from './mcp'
 import landing from './landing'
 import common from './common'
@@ -9,6 +10,7 @@ import admin from './admin'
 import misc from './misc'
 
 export default {
+  appleid,
   adminAccessKeys,
   mcp,
   ...landing,
