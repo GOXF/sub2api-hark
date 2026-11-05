@@ -96,8 +96,7 @@ func (s *Server) directTransport() http.RoundTripper {
 	if t := s.proxyCache.m[ProxyDirect]; t != nil {
 		return t
 	}
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.Proxy = nil
+	t := browserTransport(nil)
 	s.proxyCache.m[ProxyDirect] = t
 	return t
 }

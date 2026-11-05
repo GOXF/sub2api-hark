@@ -94,8 +94,7 @@ func (s *Server) transportForProxy(raw string) http.RoundTripper {
 	if err != nil {
 		return nil
 	}
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.Proxy = http.ProxyURL(u)
+	t := browserTransport(u)
 	s.proxyCache.m[raw] = t
 	return t
 }
@@ -143,7 +142,7 @@ func (s *Server) transportFor(cookie string) http.RoundTripper {
 		ua = DefaultUserAgent
 	}
 	base := s.client.Transport
-	if direct {
+	if direct || (proxy == "" && s.upstreamProxy == "") {
 		base = s.directTransport()
 	} else if proxy != "" {
 		if t := s.transportForProxy(proxy); t != nil {
