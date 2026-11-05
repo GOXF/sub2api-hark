@@ -880,6 +880,10 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	if v, ok := settings[SettingKeyEnableHarkModelLabel]; ok && v != "" {
 		result.EnableHarkModelLabel = v == "true"
 	}
+	result.EnableHarkUsageEstimate = true
+	if v, ok := settings[SettingKeyEnableHarkUsageEstimate]; ok && v != "" {
+		result.EnableHarkUsageEstimate = v == "true"
+	}
 	result.HarkModelLabelPrompt = settings[SettingKeyHarkModelLabelPrompt]
 	if strings.TrimSpace(result.HarkModelLabelPrompt) == "" {
 		result.HarkModelLabelPrompt = harkembed.DefaultModelLabelPrompt

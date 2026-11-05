@@ -25,6 +25,10 @@ const (
 	// 空值或缺失时 harkembed 使用内置默认。
 	HarkModelLabelPrompt Key = "ctx_hark_model_label_prompt"
 
+	// HarkUsageEstimateDisabled 为 true 时，进程内 Hark 网关不为零用量响应估算 Token
+	// （后台关闭 enable_hark_usage_estimate 时由 OpenAI 网关为 Hark 账号请求设置）。
+	HarkUsageEstimateDisabled Key = "ctx_hark_usage_estimate_disabled"
+
 	// CompositeRouteSource 标识 composite 解析结果来自显式路由还是内置模型探测。
 	CompositeRouteSource Key = "ctx_composite_route_source"
 

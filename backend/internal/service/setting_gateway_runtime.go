@@ -63,6 +63,7 @@ type cachedGatewayForwardingSettings struct {
 	claudeOAuthSystemPromptBlocks    string
 	harkModelLabel                   bool
 	harkModelLabelPrompt             string
+	harkUsageEstimate                bool
 	anthropicCacheTTL1hInjection     bool
 	rewriteMessageCacheControl       bool
 	clientDatelineNormalization      bool
@@ -865,6 +866,7 @@ type gatewayForwardingSettingsResult struct {
 	claudeOAuthSystemPrompt, claudeOAuthSystemPromptBlocks                                string
 	harkModelLabel                                                                        bool
 	harkModelLabelPrompt                                                                  string
+	harkUsageEstimate                                                                     bool
 }
 
 func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context) gatewayForwardingSettingsResult {
@@ -880,6 +882,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				claudeOAuthSystemPromptBlocks:    cached.claudeOAuthSystemPromptBlocks,
 				harkModelLabel:                   cached.harkModelLabel,
 				harkModelLabelPrompt:             cached.harkModelLabelPrompt,
+				harkUsageEstimate:                cached.harkUsageEstimate,
 				cacheTTL1h:                       cached.anthropicCacheTTL1hInjection,
 				rewriteMessageCacheControl:       cached.rewriteMessageCacheControl,
 				clientDatelineNormalization:      cached.clientDatelineNormalization,
@@ -899,6 +902,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 					claudeOAuthSystemPromptBlocks:    cached.claudeOAuthSystemPromptBlocks,
 					harkModelLabel:                   cached.harkModelLabel,
 					harkModelLabelPrompt:             cached.harkModelLabelPrompt,
+					harkUsageEstimate:                cached.harkUsageEstimate,
 					cacheTTL1h:                       cached.anthropicCacheTTL1hInjection,
 					rewriteMessageCacheControl:       cached.rewriteMessageCacheControl,
 					clientDatelineNormalization:      cached.clientDatelineNormalization,
@@ -917,6 +921,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			SettingKeyClaudeOAuthSystemPromptBlocks,
 			SettingKeyEnableHarkModelLabel,
 			SettingKeyHarkModelLabelPrompt,
+			SettingKeyEnableHarkUsageEstimate,
 			SettingKeyEnableAnthropicCacheTTL1hInjection,
 			SettingKeyRewriteMessageCacheControl,
 			SettingKeyEnableClientDatelineNormalization,
@@ -930,12 +935,13 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 				cchSigning:                       false,
 				claudeOAuthSystemPromptInjection: true,
 				harkModelLabel:                   true,
+				harkUsageEstimate:                true,
 				anthropicCacheTTL1hInjection:     false,
 				rewriteMessageCacheControl:       s.defaultRewriteMessageCacheControl(),
 				clientDatelineNormalization:      true,
 				expiresAt:                        time.Now().Add(gatewayForwardingErrorTTL).UnixNano(),
 			})
-			return gatewayForwardingSettingsResult{openAITTFTMode: OpenAITTFTModeSemantic, fp: true, claudeOAuthSystemPromptInjection: true, harkModelLabel: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
+			return gatewayForwardingSettingsResult{openAITTFTMode: OpenAITTFTModeSemantic, fp: true, claudeOAuthSystemPromptInjection: true, harkModelLabel: true, harkUsageEstimate: true, rewriteMessageCacheControl: s.defaultRewriteMessageCacheControl(), clientDatelineNormalization: true}, nil
 		}
 		ttftMode := normalizeOpenAITTFTMode(values[SettingKeyOpenAITTFTMode])
 		fp := true
@@ -955,6 +961,10 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			harkModelLabel = v == "true"
 		}
 		harkModelLabelPrompt := values[SettingKeyHarkModelLabelPrompt]
+		harkUsageEstimate := true
+		if v, ok := values[SettingKeyEnableHarkUsageEstimate]; ok && v != "" {
+			harkUsageEstimate = v == "true"
+		}
 		cacheTTL1h := values[SettingKeyEnableAnthropicCacheTTL1hInjection] == "true"
 		rewriteMessageCacheControl := s.defaultRewriteMessageCacheControl()
 		if v, ok := values[SettingKeyRewriteMessageCacheControl]; ok && v != "" {
@@ -974,6 +984,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			claudeOAuthSystemPromptBlocks:    systemPromptBlocks,
 			harkModelLabel:                   harkModelLabel,
 			harkModelLabelPrompt:             harkModelLabelPrompt,
+			harkUsageEstimate:                harkUsageEstimate,
 			anthropicCacheTTL1hInjection:     cacheTTL1h,
 			rewriteMessageCacheControl:       rewriteMessageCacheControl,
 			clientDatelineNormalization:      clientDatelineNormalization,
@@ -989,6 +1000,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 			claudeOAuthSystemPromptBlocks:    systemPromptBlocks,
 			harkModelLabel:                   harkModelLabel,
 			harkModelLabelPrompt:             harkModelLabelPrompt,
+			harkUsageEstimate:                harkUsageEstimate,
 			cacheTTL1h:                       cacheTTL1h,
 			rewriteMessageCacheControl:       rewriteMessageCacheControl,
 			clientDatelineNormalization:      clientDatelineNormalization,
@@ -997,7 +1009,7 @@ func (s *SettingService) getGatewayForwardingSettingsCached(ctx context.Context)
 	if r, ok := val.(gatewayForwardingSettingsResult); ok {
 		return r
 	}
-	return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, harkModelLabel: true, clientDatelineNormalization: true}
+	return gatewayForwardingSettingsResult{fp: true, claudeOAuthSystemPromptInjection: true, harkModelLabel: true, harkUsageEstimate: true, clientDatelineNormalization: true}
 }
 
 // GetOpenAITTFTMode 返回 Responses first_token_ms 的统计口径。
@@ -1046,6 +1058,16 @@ func (s *SettingService) GetHarkModelLabelSettings(ctx context.Context) (enabled
 	}
 	result := s.getGatewayForwardingSettingsCached(ctx)
 	return result.harkModelLabel, result.harkModelLabelPrompt
+}
+
+// GetHarkUsageEstimateEnabled returns whether zero usage of Hark account
+// responses is replaced by a token estimate (enable_hark_usage_estimate,
+// default true).
+func (s *SettingService) GetHarkUsageEstimateEnabled(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return true
+	}
+	return s.getGatewayForwardingSettingsCached(ctx).harkUsageEstimate
 }
 
 // GetClaudeCodeVersionBounds 获取 Claude Code 版本号上下限要求

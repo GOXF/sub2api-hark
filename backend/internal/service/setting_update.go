@@ -490,6 +490,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		harkModelLabelPrompt = ""
 	}
 	updates[SettingKeyHarkModelLabelPrompt] = harkModelLabelPrompt
+	updates[SettingKeyEnableHarkUsageEstimate] = strconv.FormatBool(settings.EnableHarkUsageEstimate)
 	updates[SettingKeyEnableAnthropicCacheTTL1hInjection] = strconv.FormatBool(settings.EnableAnthropicCacheTTL1hInjection)
 	updates[SettingKeyRewriteMessageCacheControl] = strconv.FormatBool(settings.RewriteMessageCacheControl)
 	updates[SettingKeyEnableClientDatelineNormalization] = strconv.FormatBool(settings.EnableClientDatelineNormalization)
@@ -734,6 +735,7 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		claudeOAuthSystemPromptBlocks:    settings.ClaudeOAuthSystemPromptBlocks,
 		harkModelLabel:                   settings.EnableHarkModelLabel,
 		harkModelLabelPrompt:             settings.HarkModelLabelPrompt,
+		harkUsageEstimate:                settings.EnableHarkUsageEstimate,
 		anthropicCacheTTL1hInjection:     settings.EnableAnthropicCacheTTL1hInjection,
 		rewriteMessageCacheControl:       settings.RewriteMessageCacheControl,
 		clientDatelineNormalization:      settings.EnableClientDatelineNormalization,

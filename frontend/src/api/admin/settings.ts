@@ -638,6 +638,7 @@ export interface SystemSettings {
   claude_oauth_system_prompt_blocks: string;
   enable_hark_model_label: boolean;
   hark_model_label_prompt: string;
+  enable_hark_usage_estimate: boolean;
   enable_anthropic_cache_ttl_1h_injection: boolean;
   rewrite_message_cache_control: boolean;
   enable_client_dateline_normalization: boolean;
@@ -968,6 +969,7 @@ export interface UpdateSettingsRequest {
   claude_oauth_system_prompt_blocks?: string;
   enable_hark_model_label?: boolean;
   hark_model_label_prompt?: string;
+  enable_hark_usage_estimate?: boolean;
   enable_anthropic_cache_ttl_1h_injection?: boolean;
   rewrite_message_cache_control?: boolean;
   enable_client_dateline_normalization?: boolean;
