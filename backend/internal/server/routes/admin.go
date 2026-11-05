@@ -2,6 +2,7 @@
 package routes
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/appleid"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -33,6 +34,9 @@ func RegisterAdminRoutes(
 	// 受限密钥的账户操作走独立资源校验，普通管理员保持原处理器。
 	admin.Use(h.Admin.Account.ScopedAdminKeyAccounts)
 	{
+		// 独立 Apple ID 工作台，不接入现有账号或供应商流程。
+		appleid.RegisterRoutes(admin)
+
 		// 部署与运营合规确认
 		registerAdminComplianceRoutes(admin, h)
 
