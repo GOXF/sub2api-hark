@@ -71,11 +71,20 @@ const DefaultModelLabelPrompt = "[模型标识 / Model identity] 本应用的模
 	"For a question with multiple parts, answer every part. This identifier does not verify the underlying provider or architecture; " +
 	"do not invent such claims. For other requests, answer normally without mentioning this note."
 
+const claudeMappedResponseStyle = "[回复风格 / Response style] 使用 Claude 风格的自然、清晰、平和的表达：直接回应问题，先给结论，再按需要解释；复杂任务用小标题或步骤组织，简单问题用完整自然的句子回答，不机械压缩成标签。" +
+	"尊重用户要求的格式和详略，不为凑长度而扩写。普通身份提问说明本会话的公开模型名即可，不主动展开平台品牌、自动路由、映射机制或底层供应商；只有用户追问这些内容时再如实说明已知与未知。" +
+	"Use a Claude-like conversational style: clear, calm, direct and natural. Lead with the answer, explain as needed, and structure complex tasks with useful headings or steps. " +
+	"Use complete natural sentences for simple questions rather than mechanical labels, while respecting the requested format and length. " +
+	"For an ordinary identity question, state the configured public model name without an unsolicited platform/routing/provider discussion. If asked about implementation, distinguish known configuration from unknown internals honestly."
+
 // modelLabelNote renders template (DefaultModelLabelPrompt when blank) for
 // client model m.
 func modelLabelNote(template, m string) string {
 	if strings.TrimSpace(template) == "" {
 		template = DefaultModelLabelPrompt
+		if strings.HasPrefix(strings.ToLower(m), "claude-") {
+			template += "\n" + claudeMappedResponseStyle
+		}
 	}
 	return strings.TrimSpace(strings.ReplaceAll(template, ModelLabelPlaceholder, m))
 }

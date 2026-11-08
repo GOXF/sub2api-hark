@@ -71,6 +71,25 @@ func TestDefaultModelLabelUsesMappedIdentity(t *testing.T) {
 	}
 }
 
+func TestClaudeMappedResponseStyle(t *testing.T) {
+	for _, model := range []string{"claude-opus-5-5", "claude-sonnet-4-6", "CLAUDE-OPUS-4-6"} {
+		note := modelLabelNote("", model)
+		for _, want := range []string{model, "Claude-like conversational style", "完整自然的句子", "requested format and length", "unknown internals honestly"} {
+			if !strings.Contains(note, want) {
+				t.Errorf("model=%q missing style guidance %q", model, want)
+			}
+		}
+	}
+	for _, model := range []string{"gpt-6.1-sol", "custom-model-alias"} {
+		if strings.Contains(modelLabelNote("", model), "Claude-like conversational style") {
+			t.Errorf("Claude style applied to unrelated alias %q", model)
+		}
+	}
+	if got := modelLabelNote("Custom note for {model}", "claude-opus-5-5"); got != "Custom note for claude-opus-5-5" {
+		t.Fatalf("administrator custom note changed: %q", got)
+	}
+}
+
 func TestInjectModelLabelChatCompletions(t *testing.T) {
 	body := `{"model":"gpt-5","messages":[{"role":"system","content":"You are GPT-5."},{"role":"developer","content":"d"},{"role":"user","content":"你是什么模型？"}],"stream":true}`
 	got := readLabelled(t, labelRequest(t, "/v1/chat/completions", body, "gpt-5"))
