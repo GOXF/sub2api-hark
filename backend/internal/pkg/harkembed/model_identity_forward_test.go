@@ -16,6 +16,14 @@ import (
 )
 
 func TestIdentityQuestionsUseUpstreamGeneration(t *testing.T) {
+	testIdentityUpstreamGeneration(t, false)
+}
+
+func TestMappedIdentityUpstreamRepliesAreAdapted(t *testing.T) {
+	testIdentityUpstreamGeneration(t, true)
+}
+
+func testIdentityUpstreamGeneration(t *testing.T, mismatch bool) {
 	for _, protocol := range []string{"chat", "responses", "messages"} {
 		for _, stream := range []bool{false, true} {
 			for _, mixed := range []bool{false, true} {
@@ -33,6 +41,16 @@ func TestIdentityQuestionsUseUpstreamGeneration(t *testing.T) {
 					answer := "当前会话使用的是 " + model + "。这是上游自然生成的完整回答。"
 					if mixed {
 						answer += "一、恢复会话加载已有上下文。二、继续任务明确启动下一回合。"
+					}
+					upstreamAnswer := answer
+					if mismatch {
+						upstreamAnswer = "Hark 会根据任务分配不同模型，我无法确认当前实际模型。"
+						answer = "当前会话配置的模型是 " + model + "。"
+						if mixed {
+							remainder := "一、恢复会话加载已有上下文。二、继续任务明确启动下一回合。"
+							upstreamAnswer += "\n\n" + remainder
+							answer += "\n\n" + remainder
+						}
 					}
 					var mu sync.Mutex
 					var sent map[string]string
@@ -62,7 +80,7 @@ func TestIdentityQuestionsUseUpstreamGeneration(t *testing.T) {
 						case "/api/messages/history":
 							_ = json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{
 								"id": sent["responseMessageId"], "role": "assistant", "triggeredByMessageId": sent["idempotencyKey"],
-								"jobStatus": "completed", "isStreaming": false, "content": answer,
+								"jobStatus": "completed", "isStreaming": false, "content": upstreamAnswer,
 							}}})
 						default:
 							http.Error(w, "unexpected fixture request", http.StatusNotFound)
