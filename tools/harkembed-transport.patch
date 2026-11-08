@@ -362,3 +362,249 @@ new file mode 100644
 +		t.Fatal("storage client's wrapper swallowed idle connection cleanup")
 +	}
 +}
+diff --git a/chat.go b/chat.go
+--- a/chat.go
++++ b/chat.go
+@@ -73 +73 @@
+-	text += toolPrompt(v.Tools, v.ToolChoice)
++	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
+@@ -345,0 +346,4 @@
++	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
++		s.turnFailed(w, r, ctx, err, format)
++		return
++	}
+@@ -352,0 +357,4 @@
++		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
++			s.turnFailed(w, r, ctx, err, format)
++			return
++		}
+@@ -399 +407,3 @@
+-			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
++			// A required-tool turn is validated before releasing assistant text.
++			// Keepalives still flow, and ordinary auto/none turns stay incremental.
++			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
+@@ -419,0 +430,4 @@
++	if err == nil {
++		s.applyToolCalls(v, res)
++		err = validateClientToolResult(v, res.ToolCalls)
++	}
+@@ -437 +450,0 @@
+-	s.applyToolCalls(v, res)
+diff --git a/chat_input.go b/chat_input.go
+--- a/chat_input.go
++++ b/chat_input.go
+@@ -66,0 +67,2 @@
++	// Preserve an explicit name even when it is a mode word (auto/none/required).
++	ToolChoiceNamed bool `json:"-"`
+@@ -303 +305,2 @@
+-	if v.ToolChoice == "none" {
++	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
++	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
+diff --git a/messages.go b/messages.go
+--- a/messages.go
++++ b/messages.go
+@@ -350 +350,2 @@
+-	if v.ToolChoice == "none" {
++	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
++	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
+diff --git a/tools.go b/tools.go
+--- a/tools.go
++++ b/tools.go
+@@ -145,0 +146,3 @@
++		if m.Type == "required" || m.Type == "auto" || m.Type == "none" {
++			return m.Type
++		}
+@@ -151,2 +154,2 @@
+-func toolPrompt(tools []toolSpec, choice string) string {
+-	if len(tools) == 0 || choice == "none" {
++func toolPrompt(tools []toolSpec, choice string, named bool) string {
++	if len(tools) == 0 || choice == "none" && !named {
+@@ -177,3 +180,5 @@
+-	switch choice {
+-	case "auto", "":
+-	case "required":
++	switch {
++	case named:
++		b.WriteString("- This turn you MUST call the tool \"" + choice + "\".\n")
++	case choice == "auto" || choice == "":
++	case choice == "required":
+@@ -208,0 +214,10 @@
++}
++
++func isNamedToolChoice(raw json.RawMessage) bool {
++	var selection struct {
++		Name     string `json:"name"`
++		Function struct {
++			Name string `json:"name"`
++		} `json:"function"`
++	}
++	return json.Unmarshal(raw, &selection) == nil && (selection.Name != "" || selection.Function.Name != "")
+diff --git a/tool_contract.go b/tool_contract.go
+new file mode 100644
+--- /dev/null
++++ b/tool_contract.go
+@@ -0,0 +1,51 @@
++package gateway
++
++import "net/http"
++
++func requiresClientTool(v chatRequest) bool {
++	return v.ToolChoiceNamed || v.ToolChoice != "" && v.ToolChoice != "auto" && v.ToolChoice != "none"
++}
++
++func validateClientToolRequest(v chatRequest, forwardExtra bool) error {
++	if !requiresClientTool(v) {
++		return nil
++	}
++	if forwardExtra {
++		return &upstreamError{http.StatusBadRequest, "tool_choice_unsupported", "forward-extra 模式未启用客户端工具解析，请关闭该模式后使用必需工具调用"}
++	}
++	if len(v.Tools) == 0 {
++		return &upstreamError{http.StatusBadRequest, "invalid_tool_choice", "必需工具调用要求客户端声明可用工具"}
++	}
++	if v.ToolChoice != "required" || v.ToolChoiceNamed {
++		for _, tool := range v.Tools {
++			if tool.Name == v.ToolChoice {
++				return nil
++			}
++		}
++		return &upstreamError{http.StatusBadRequest, "invalid_tool_choice", "指定工具不在客户端声明的工具列表中"}
++	}
++	return nil
++}
++
++func validateClientToolResult(v chatRequest, calls []toolCall) error {
++	if !requiresClientTool(v) {
++		return nil
++	}
++	// This turn has already been accepted upstream. A non-retryable 422 avoids
++	// replaying it on another account; a textual promise is not an execution.
++	if len(calls) == 0 {
++		return &upstreamError{http.StatusUnprocessableEntity, "tool_call_missing", "上游未返回要求的客户端工具调用；本机执行尚未开始，请检查工具调用记录后显式继续"}
++	}
++	if v.ToolChoice != "required" || v.ToolChoiceNamed {
++		for _, call := range calls {
++			name := call.Name
++			if call.Namespace != "" {
++				name = call.Namespace + "." + name
++			}
++			if name != v.ToolChoice {
++				return &upstreamError{http.StatusUnprocessableEntity, "tool_call_mismatch", "上游返回的客户端工具与指定工具不一致；本机执行尚未开始，请检查工具调用记录后显式继续"}
++			}
++		}
++	}
++	return nil
++}
+diff --git a/tool_contract_test.go b/tool_contract_test.go
+new file mode 100644
+--- /dev/null
++++ b/tool_contract_test.go
+@@ -0,0 +1,108 @@
++package gateway
++
++import (
++	"encoding/json"
++	"errors"
++	"strings"
++	"testing"
++)
++
++func TestClientToolRequestContract(t *testing.T) {
++	tools := []toolSpec{{Name: "read_file"}}
++	for _, tc := range []struct {
++		name, choice string
++		tools        []toolSpec
++		forwardExtra bool
++		code         string
++	}{
++		{"required", "required", tools, false, ""},
++		{"named", "read_file", tools, false, ""},
++		{"missing_tools", "required", nil, false, "invalid_tool_choice"},
++		{"unknown_name", "not_declared", tools, false, "invalid_tool_choice"},
++		{"extra_required", "required", tools, true, "tool_choice_unsupported"},
++		{"extra_auto", "auto", nil, true, ""},
++		{"ordinary", "auto", nil, false, ""},
++		{"none", "none", nil, false, ""},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			err := validateClientToolRequest(chatRequest{Tools: tc.tools, ToolChoice: tc.choice}, tc.forwardExtra)
++			var upstream *upstreamError
++			if tc.code == "" {
++				if err != nil {
++					t.Fatal(err)
++				}
++			} else if !errors.As(err, &upstream) || upstream.code != tc.code || upstream.status != 400 {
++				t.Fatalf("err=%v; want pre-submission 400 %s", err, tc.code)
++			}
++		})
++	}
++}
++
++func TestNamedClientToolModeWordsRemainNames(t *testing.T) {
++	for _, name := range []string{"auto", "none", "required"} {
++		t.Run(name, func(t *testing.T) {
++			raw := json.RawMessage(`{"type":"function","function":{"name":"` + name + `"}}`)
++			if !isNamedToolChoice(raw) {
++				t.Fatal("an explicit function name was treated as a mode")
++			}
++			v := chatRequest{ToolChoice: parseToolChoice(raw), ToolChoiceNamed: true, Tools: []toolSpec{{Name: name}}}
++			if !requiresClientTool(v) {
++				t.Fatal("named mode word disabled tool enforcement")
++			}
++			if err := validateClientToolRequest(v, false); err != nil {
++				t.Fatal(err)
++			}
++			if err := validateClientToolResult(v, []toolCall{{Name: name}}); err != nil {
++				t.Fatal(err)
++			}
++			if err := validateClientToolResult(v, nil); err == nil {
++				t.Fatal("missing named tool call was accepted")
++			}
++			if !strings.Contains(toolPrompt(v.Tools, v.ToolChoice, true), `MUST call the tool "`+name+`"`) {
++				t.Fatal("tool instructions lost the explicit name")
++			}
++		})
++	}
++}
++
++func TestNamedClientToolResultContract(t *testing.T) {
++	for _, tc := range []struct {
++		name, choice string
++		calls        []toolCall
++		code         string
++	}{
++		{"namespaced", "files.read_file", []toolCall{{Namespace: "files", Name: "read_file"}}, ""},
++		{"other_namespace", "files.read_file", []toolCall{{Namespace: "other", Name: "read_file"}}, "tool_call_mismatch"},
++		{"mixed_calls", "read_file", []toolCall{{Name: "read_file"}, {Name: "other_file"}}, "tool_call_mismatch"},
++		{"required_missing", "required", nil, "tool_call_missing"},
++		{"named_missing", "read_file", nil, "tool_call_missing"},
++		{"auto_plain", "auto", nil, ""},
++		{"none_plain", "none", nil, ""},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			err := validateClientToolResult(chatRequest{ToolChoice: tc.choice}, tc.calls)
++			var upstream *upstreamError
++			if tc.code == "" {
++				if err != nil {
++					t.Fatal(err)
++				}
++			} else if !errors.As(err, &upstream) || upstream.code != tc.code || upstream.status != 422 {
++				t.Fatalf("err=%v; want accepted non-retryable 422 %s", err, tc.code)
++			}
++		})
++	}
++}
++
++func TestToolChoiceObjectsHonorRequiredType(t *testing.T) {
++	for _, tc := range []struct{ raw, want string }{
++		{`{"type":"required"}`, "required"},
++		{`{"type":"auto"}`, "auto"},
++		{`{"type":"none"}`, "none"},
++		{`{"type":"function","name":"read_file"}`, "read_file"},
++		{`{"type":"function","function":{"name":"read_file"}}`, "read_file"},
++	} {
++		if got := parseToolChoice(json.RawMessage(tc.raw)); got != tc.want {
++			t.Errorf("parseToolChoice(%s)=%q; want=%q", tc.raw, got, tc.want)
++		}
++	}
++}

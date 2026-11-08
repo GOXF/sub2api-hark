@@ -143,13 +143,16 @@ func parseToolChoice(raw json.RawMessage) string {
 		if m.Name != "" {
 			return m.Name
 		}
+		if m.Type == "required" || m.Type == "auto" || m.Type == "none" {
+			return m.Type
+		}
 	}
 	return "auto"
 }
 
 // toolPrompt 附在发给 Hark 的消息后面的工具说明。每轮都带：Project 里早先的说明可能被压缩掉。
-func toolPrompt(tools []toolSpec, choice string) string {
-	if len(tools) == 0 || choice == "none" {
+func toolPrompt(tools []toolSpec, choice string, named bool) string {
+	if len(tools) == 0 || choice == "none" && !named {
 		return ""
 	}
 	var b strings.Builder
@@ -174,9 +177,11 @@ func toolPrompt(tools []toolSpec, choice string) string {
 	b.WriteString("- You may put several <tool_call> blocks in one reply when the calls do not depend on each other.\n")
 	b.WriteString("- When the task is done or you need nothing more from the computer, answer normally with no <tool_call> block.\n")
 	b.WriteString("- Never say you cannot access the user's files or directories: use the tools.\n")
-	switch choice {
-	case "auto", "":
-	case "required":
+	switch {
+	case named:
+		b.WriteString("- This turn you MUST call the tool \"" + choice + "\".\n")
+	case choice == "auto" || choice == "":
+	case choice == "required":
 		b.WriteString("- This turn you MUST call at least one tool.\n")
 	default:
 		b.WriteString("- This turn you MUST call the tool \"" + choice + "\".\n")
@@ -206,6 +211,16 @@ func toolPrompt(tools []toolSpec, choice string) string {
 		}
 	}
 	return b.String()
+}
+
+func isNamedToolChoice(raw json.RawMessage) bool {
+	var selection struct {
+		Name     string `json:"name"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	return json.Unmarshal(raw, &selection) == nil && (selection.Name != "" || selection.Function.Name != "")
 }
 
 func compactJSON(raw json.RawMessage) string {

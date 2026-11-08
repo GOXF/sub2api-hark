@@ -339,7 +339,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	var firstTokenMs *int
 	clientDisconnected := false
 	sawTerminalEvent := false
-	var budgetFailure error
+	var acceptedFailure error
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -429,8 +429,8 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				if !clientDisconnected {
 					flusher.Flush()
 				}
-				if budgetFailure != nil {
-					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), budgetFailure
+				if acceptedFailure != nil {
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), acceptedFailure
 				}
 				if !sawTerminalEvent {
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
@@ -439,8 +439,8 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
 			}
 			if ev.err != nil {
-				if budgetFailure != nil {
-					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), budgetFailure
+				if acceptedFailure != nil {
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), acceptedFailure
 				}
 				if sawTerminalEvent {
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
@@ -464,9 +464,11 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			line := ev.line
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
-				if account.IsHark() && isHarkBudgetExhausted([]byte(trimmed)) {
-					budgetFailure = fmt.Errorf("upstream_budget_exhausted: %s", extractUpstreamErrorMessage([]byte(trimmed)))
-					setOpsUpstreamError(c, http.StatusTooManyRequests, budgetFailure.Error(), "")
+				if account.IsHark() {
+					if status, failure := harkAcceptedTurnFailure([]byte(trimmed)); failure != nil {
+						acceptedFailure = failure
+						setOpsUpstreamError(c, status, acceptedFailure.Error(), "")
+					}
 				}
 				observer.ObserveAnthropic([]byte(trimmed))
 				if anthropicStreamEventIsTerminal("", trimmed) {

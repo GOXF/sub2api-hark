@@ -64,6 +64,8 @@ type chatRequest struct {
 	// Tools / ToolChoice：客户端声明的工具（见 tools.go 的工具调用模拟）。
 	Tools      []toolSpec `json:"-"`
 	ToolChoice string     `json:"-"`
+	// Preserve an explicit name even when it is a mode word (auto/none/required).
+	ToolChoiceNamed bool `json:"-"`
 	// ToolsDeclared 客户端请求里声明的工具数（tool_choice=none 等丢弃之前），请求记录用。
 	ToolsDeclared int             `json:"-"`
 	OriginalBody  json.RawMessage `json:"-"`
@@ -300,7 +302,8 @@ func parseEnvelope(object map[string]json.RawMessage, v *chatRequest) error {
 	}
 	v.Tools, v.ToolsDeclared = tools, len(tools)
 	v.ToolChoice = parseToolChoice(object["tool_choice"])
-	if v.ToolChoice == "none" {
+	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
+	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
 		v.Tools = nil
 	}
 	if v.SessionID == "" {
