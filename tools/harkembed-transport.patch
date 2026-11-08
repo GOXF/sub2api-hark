@@ -1,0 +1,199 @@
+diff --git a/browser_tls.go b/browser_tls.go
+new file mode 100644
+--- /dev/null
++++ b/browser_tls.go
+@@ -0,0 +1,159 @@
++package gateway
++
++import (
++	"bufio"
++	"context"
++	"crypto/tls"
++	"encoding/base64"
++	"errors"
++	"fmt"
++	"net"
++	"net/http"
++	"net/url"
++	"strings"
++	"time"
++
++	utls "github.com/refraction-networking/utls"
++	"golang.org/x/net/proxy"
++)
++
++// Cloudflare in front of hark.com rejects Go's standard TLS ClientHello from
++// datacenter IPs ("Attention Required!", HTTP 403 on POST /api/conversations)
++// while the same cookie, IP and headers pass with curl. Outbound Hark calls
++// therefore use a browser ClientHello (Firefox, matching DefaultUserAgent),
++// with ALPN limited to http/1.1 because net/http only speaks HTTP/2 over
++// crypto/tls connections.
++
++const browserDialTimeout = 15 * time.Second
++
++// browserTransport returns a transport that reaches Hark with a Firefox TLS
++// fingerprint, directly (proxyURL nil) or through an http(s)/socks5 proxy.
++func browserTransport(proxyURL *url.URL) *http.Transport {
++	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
++		return dialVia(ctx, proxyURL, network, addr)
++	}
++	return &http.Transport{
++		Proxy:       nil,
++		DialContext: dial,
++		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++			return dialBrowserTLS(ctx, dial, network, addr)
++		},
++		ForceAttemptHTTP2:     false,
++		MaxIdleConns:          100,
++		MaxIdleConnsPerHost:   16,
++		IdleConnTimeout:       90 * time.Second,
++		TLSHandshakeTimeout:   browserDialTimeout,
++		ExpectContinueTimeout: time.Second,
++	}
++}
++
++func dialBrowserTLS(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), network, addr string) (net.Conn, error) {
++	conn, err := dial(ctx, network, addr)
++	if err != nil {
++		return nil, err
++	}
++	host, _, splitErr := net.SplitHostPort(addr)
++	if splitErr != nil {
++		host = addr
++	}
++	spec, err := utls.UTLSIdToSpec(utls.HelloFirefox_Auto)
++	if err != nil {
++		_ = conn.Close()
++		return nil, fmt.Errorf("browser tls spec: %w", err)
++	}
++	for _, ext := range spec.Extensions {
++		if alpn, ok := ext.(*utls.ALPNExtension); ok {
++			alpn.AlpnProtocols = []string{"http/1.1"}
++		}
++	}
++	uc := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloCustom)
++	if err := uc.ApplyPreset(&spec); err != nil {
++		_ = conn.Close()
++		return nil, fmt.Errorf("browser tls preset: %w", err)
++	}
++	hctx, cancel := context.WithTimeout(ctx, browserDialTimeout)
++	defer cancel()
++	if err := uc.HandshakeContext(hctx); err != nil {
++		_ = conn.Close()
++		return nil, fmt.Errorf("browser tls handshake: %w", err)
++	}
++	return uc, nil
++}
++
++// dialVia opens a TCP connection to addr, through proxyURL when set.
++func dialVia(ctx context.Context, proxyURL *url.URL, network, addr string) (net.Conn, error) {
++	base := &net.Dialer{Timeout: browserDialTimeout, KeepAlive: 30 * time.Second}
++	if proxyURL == nil {
++		return base.DialContext(ctx, network, addr)
++	}
++	switch strings.ToLower(proxyURL.Scheme) {
++	case "socks5", "socks5h":
++		u := *proxyURL
++		u.Scheme = "socks5" // x/net resolves the target host on the proxy side
++		d, err := proxy.FromURL(&u, base)
++		if err != nil {
++			return nil, fmt.Errorf("socks5 proxy: %w", err)
++		}
++		if cd, ok := d.(proxy.ContextDialer); ok {
++			return cd.DialContext(ctx, network, addr)
++		}
++		return d.Dial(network, addr)
++	case "http", "https":
++		return dialHTTPConnect(ctx, base, proxyURL, addr)
++	}
++	return nil, fmt.Errorf("unsupported proxy scheme %q", proxyURL.Scheme)
++}
++
++func dialHTTPConnect(ctx context.Context, base *net.Dialer, proxyURL *url.URL, addr string) (net.Conn, error) {
++	proxyAddr := proxyURL.Host
++	if proxyURL.Port() == "" {
++		if strings.EqualFold(proxyURL.Scheme, "https") {
++			proxyAddr = net.JoinHostPort(proxyURL.Hostname(), "443")
++		} else {
++			proxyAddr = net.JoinHostPort(proxyURL.Hostname(), "80")
++		}
++	}
++	conn, err := base.DialContext(ctx, "tcp", proxyAddr)
++	if err != nil {
++		return nil, err
++	}
++	if strings.EqualFold(proxyURL.Scheme, "https") {
++		tc := tls.Client(conn, &tls.Config{ServerName: proxyURL.Hostname(), MinVersion: tls.VersionTLS12})
++		if err := tc.HandshakeContext(ctx); err != nil {
++			_ = conn.Close()
++			return nil, err
++		}
++		conn = tc
++	}
++	if deadline, ok := ctx.Deadline(); ok {
++		_ = conn.SetDeadline(deadline)
++	} else {
++		_ = conn.SetDeadline(time.Now().Add(browserDialTimeout))
++	}
++	req := &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: addr}, Host: addr, Header: http.Header{}}
++	if u := proxyURL.User; u != nil {
++		pass, _ := u.Password()
++		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(u.Username()+":"+pass)))
++	}
++	if err := req.Write(conn); err != nil {
++		_ = conn.Close()
++		return nil, err
++	}
++	br := bufio.NewReader(conn)
++	resp, err := http.ReadResponse(br, req)
++	if err != nil {
++		_ = conn.Close()
++		return nil, err
++	}
++	_ = resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		_ = conn.Close()
++		return nil, fmt.Errorf("proxy CONNECT: %s", resp.Status)
++	}
++	if br.Buffered() > 0 {
++		_ = conn.Close()
++		return nil, errors.New("proxy CONNECT: unexpected data after response")
++	}
++	_ = conn.SetDeadline(time.Time{})
++	return conn, nil
++}
+diff --git a/source.go b/source.go
+--- a/source.go
++++ b/source.go
+@@ -94,8 +94,7 @@
+ 	if err != nil {
+ 		return nil
+ 	}
+-	t := http.DefaultTransport.(*http.Transport).Clone()
+-	t.Proxy = http.ProxyURL(u)
++	t := browserTransport(u)
+ 	s.proxyCache.m[raw] = t
+ 	return t
+ }
+@@ -143,7 +142,7 @@
+ 		ua = DefaultUserAgent
+ 	}
+ 	base := s.client.Transport
+-	if direct {
++	if direct || (proxy == "" && s.upstreamProxy == "") {
+ 		base = s.directTransport()
+ 	} else if proxy != "" {
+ 		if t := s.transportForProxy(proxy); t != nil {
+diff --git a/proxy_pool.go b/proxy_pool.go
+--- a/proxy_pool.go
++++ b/proxy_pool.go
+@@ -96,8 +96,7 @@
+ 	if t := s.proxyCache.m[ProxyDirect]; t != nil {
+ 		return t
+ 	}
+-	t := http.DefaultTransport.(*http.Transport).Clone()
+-	t.Proxy = nil
++	t := browserTransport(nil)
+ 	s.proxyCache.m[ProxyDirect] = t
+ 	return t
+ }

@@ -1274,6 +1274,7 @@ func (h *GatewayHandler) codexModelIDsForGroup(ctx context.Context, group *servi
 		if group.ModelAllowlistEnabled() {
 			models = group.ModelAllowlist.FilterForListing(models)
 		}
+		models = concreteModelIDsForListing(service.PlatformComposite, models)
 		if filtered, err := h.gatewayService.FilterCompositeCodexModels(ctx, group.ID, models); err == nil {
 			return filtered
 		}
@@ -1283,10 +1284,11 @@ func (h *GatewayHandler) codexModelIDsForGroup(ctx context.Context, group *servi
 	availableModels := h.gatewayService.GetAvailableModels(ctx, groupID, platform)
 	fallbackModels := defaultCodexModelIDsForPlatform(platform)
 	if group.ModelAllowlistEnabled() {
-		return group.ModelAllowlist.FilterForListing(modelListingSource(platform, availableModels, fallbackModels))
+		selected := group.ModelAllowlist.FilterForListing(modelListingSource(platform, availableModels, fallbackModels))
+		return concreteModelIDsForListing(platform, selected)
 	}
 	if len(availableModels) > 0 {
-		return availableModels
+		return concreteModelIDsForListing(platform, availableModels)
 	}
 	return fallbackModels
 }
@@ -1313,6 +1315,10 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 				platformModels = defaultModelIDsForPlatform(platform)
 			}
 		}
+		// Expand before flattening platforms, but retain routing patterns as
+		// selection sources for explicit group aliases. They are removed at the
+		// final catalog boundary, never expanded against another platform.
+		platformModels = mergeModelIDs(platformModels, concreteModelIDsForListing(platform, platformModels))
 		for _, model := range platformModels {
 			model = strings.TrimSpace(model)
 			if model == "" {
@@ -1339,6 +1345,7 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 }
 
 func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
+	modelIDs = concreteModelIDsForListing(platform, modelIDs)
 	if platform == service.PlatformOpenAI {
 		writeOpenAIModelsList(c, modelIDs)
 		return
@@ -1360,10 +1367,6 @@ func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
 }
 
 func writeAllowlistedModelsList(c *gin.Context, platform string, modelIDs []string) {
-	if platform == service.PlatformOpenAI {
-		writeOpenAIModelsList(c, modelIDs)
-		return
-	}
 	writeModelsList(c, platform, modelIDs)
 }
 
@@ -1453,7 +1456,7 @@ func writeOpenAIModelsList(c *gin.Context, modelIDs []string) {
 
 // modelListingSource 汇总模型列表过滤的候选来源：账号映射键（availableModels）
 // 与平台默认列表（fallbackModels）。账号映射为空时回落默认列表；Anthropic
-// 平台两者取并集，其余平台以账号映射键为准。
+// 平台两者取并集；Hark 只补充账号通配规则覆盖的默认模型，其余平台以映射键为准。
 func modelListingSource(platform string, availableModels, fallbackModels []string) []string {
 	if platform == service.PlatformOpenAI && availableModels != nil {
 		return availableModels
@@ -1464,7 +1467,38 @@ func modelListingSource(platform string, availableModels, fallbackModels []strin
 	if platform == service.PlatformAnthropic {
 		return mergeModelIDs(availableModels, fallbackModels)
 	}
+	if platform == service.PlatformHark {
+		return mergeModelIDs(availableModels, concreteModelIDsForListing(platform, availableModels))
+	}
 	return availableModels
+}
+
+// concreteModelIDsForListing keeps public aliases and expands Anthropic/Hark
+// routing patterns against the Claude catalog used by their existing fallback. Other
+// platforms retain their own discovery policy; routing patterns are never IDs.
+func concreteModelIDsForListing(platform string, modelIDs []string) []string {
+	var fallbackModels []string
+	if platform == service.PlatformAnthropic || platform == service.PlatformHark {
+		fallbackModels = claude.DefaultModelIDs()
+	}
+	models := make([]string, 0, len(modelIDs))
+	for _, model := range modelIDs {
+		model = strings.TrimSpace(model)
+		if !strings.Contains(model, "*") {
+			models = append(models, model)
+			continue
+		}
+		if !strings.HasSuffix(model, "*") {
+			continue
+		}
+		prefix := strings.TrimSuffix(model, "*")
+		for _, candidate := range fallbackModels {
+			if strings.HasPrefix(candidate, prefix) && !strings.Contains(candidate, "*") {
+				models = append(models, candidate)
+			}
+		}
+	}
+	return mergeModelIDs(models, nil)
 }
 
 func defaultCodexModelIDsForPlatform(platform string) []string {
@@ -1495,7 +1529,7 @@ func defaultModelIDsForPlatform(platform string) []string {
 			ids = append(ids, model.ID)
 		}
 		return ids
-	case service.PlatformAnthropic:
+	case service.PlatformAnthropic, service.PlatformHark:
 		return claude.DefaultModelIDs()
 	case service.PlatformGrok:
 		return xai.DefaultModelIDs()

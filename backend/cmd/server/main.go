@@ -184,12 +184,17 @@ func runMainServer() {
 
 	log.Println("Shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := app.Server.Shutdown(ctx); err != nil {
+	if err := shutdownHTTPServer(app.Server); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 
 	log.Println("Server exited")
+}
+
+func shutdownHTTPServer(server *http.Server) error {
+	// Model streams can outlive ordinary HTTP requests; let them finish before
+	// cleanup closes their upstream connections during a rolling update.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	return server.Shutdown(ctx)
 }
