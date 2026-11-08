@@ -46,7 +46,7 @@ func readLabelled(t *testing.T, r *http.Request) string {
 
 func assertNote(t *testing.T, text, model string) {
 	t.Helper()
-	for _, want := range []string{"当前会话的模型标识是 " + model, "直接回答“" + model + "”", "answer \"" + model + "\" directly"} {
+	for _, want := range []string{"当前会话的模型标识是 " + model, "自然回答", "answer naturally"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("note missing %q in %q", want, text)
 		}
@@ -57,7 +57,7 @@ func TestDefaultModelLabelUsesMappedIdentity(t *testing.T) {
 	for _, model := range []string{"gpt-5.5", "claude-opus-4-5", "custom-model-alias"} {
 		t.Run(model, func(t *testing.T) {
 			note := modelLabelNote("", model)
-			for _, want := range []string{"当前会话的模型标识是 " + model, "answer \"" + model + "\" directly", "does not verify the underlying provider"} {
+			for _, want := range []string{"当前会话的模型标识是 " + model, "answer naturally", "does not verify the underlying provider"} {
 				if !strings.Contains(note, want) {
 					t.Errorf("mapped identity note missing %q", want)
 				}
@@ -154,7 +154,7 @@ func TestInjectModelLabelAnthropicMessages(t *testing.T) {
 func TestInjectModelLabelSkips(t *testing.T) {
 	body := `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`
 	// No original model, the model "hark" (any case), whitespace only.
-	for _, m := range []string{"", "hark", "HARK", "   "} {
+	for _, m := range []string{"", "hark", "HARK", "   ", "*", "claude-*"} {
 		if got := readLabelled(t, labelRequest(t, "/v1/chat/completions", body, m)); got != body {
 			t.Fatalf("model %q: body changed: %s", m, got)
 		}

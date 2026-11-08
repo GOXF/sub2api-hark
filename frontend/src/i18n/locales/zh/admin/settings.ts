@@ -553,7 +553,7 @@ export default {
         claudeOAuthSystemPromptBlocks: 'Claude OAuth System Blocks',
         claudeOAuthSystemPromptBlocksHint: "每个 block 会保存为带 enabled、type、text、可选 cache_control 的 JSON。{'{'}billing_header{'}'} 会按请求动态生成；Claude Code 身份提示词和扩展提示词可直接编辑，也可用预设恢复默认值。",
         harkModelLabel: 'Hark 模型标注',
-        harkModelLabelHint: 'Hark 账号通过内部通道转发模型请求。开启后，被问到使用什么模型时，按客户端选择的模型标识直接回答，不以内部通道名称代替。映射名称不用于证明底层供应商或架构。默认开启；环境变量 HARK_MODEL_LABEL=off 可强制关闭。',
+        harkModelLabelHint: '开启后，通过系统提示告知上游当前会话对外配置的模型名，由上游自然回答身份问题，不截获问题或固定返回名称；详略和格式按用户要求，混合问题完整回答。映射名称不用于证明底层供应商或架构。默认开启；环境变量 HARK_MODEL_LABEL=off 可强制关闭。',
         harkModelLabelPrompt: 'Hark 模型标注提示词',
         harkModelLabelPromptPlaceholder: '留空时使用内置默认说明。',
         harkModelLabelPromptHint: "{'{'}model{'}'} 会替换为客户端原始请求的模型名。清空后恢复内置默认说明。",
