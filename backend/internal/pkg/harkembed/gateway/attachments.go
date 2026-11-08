@@ -310,7 +310,9 @@ func (s *Server) uploadFile(ctx context.Context, cookie, cid string, f inputFile
 	}
 	req.ContentLength = int64(len(f.Data))
 	req.Header.Set("Content-Type", contentType)
-	resp, err := s.clientFor(cookie, 0, false).Do(req)
+	client := s.uploadClientFor(cookie)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
 	if err != nil {
 		return harkAttachment{}, &upstreamError{502, "upstream_upload_failed", "附件上传到 Hark 存储失败"}
 	}

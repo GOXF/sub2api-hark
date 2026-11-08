@@ -20,6 +20,7 @@ var identityParagraphBreak = regexp.MustCompile(`\r?\n[ \t]*\r?\n`)
 type identityReplyScope struct {
 	model, answer string
 	mixed         bool
+	examples      bool
 }
 
 // Only explicit identity questions opt into response adaptation. Actual Hark
@@ -70,51 +71,57 @@ func mappedIdentityScope(req *http.Request) (identityReplyScope, bool) {
 	if format == labelResponses {
 		input = gjson.GetBytes(body, "input")
 	}
-	question := ""
-	if format == labelResponses && input.Type == gjson.String {
-		question = input.Str
-	} else if items := input.Array(); input.IsArray() && len(items) > 0 {
-		last := items[len(items)-1]
-		if last.Get("role").Str != "user" {
-			return scope, false
-		}
-		content := last.Get("content")
-		if content.Type == gjson.String {
-			question = content.Str
-		} else if parts := content.Array(); len(parts) == 1 && (parts[0].Get("type").Str == "text" || parts[0].Get("type").Str == "input_text") {
-			question = parts[0].Get("text").Str
-		}
+	question, previous := identityRequestQuestions(input, format)
+	intent, mixed := classifyIdentityQuestion(question, previous)
+	if intent == identityNotAsked {
+		return scope, false
 	}
-	if !isModelIdentityQuestion(question) {
-		at := strings.IndexAny(question, "?？。\n,，")
-		if at < 0 || !isModelIdentityQuestion(question[:at]) {
-			return scope, false
-		}
-		scope.mixed = strings.TrimSpace(question[at:]) != "?" && strings.TrimSpace(question[at:]) != "？"
-	}
+	scope.mixed, scope.examples = mixed, intent == identityOtherQuestions
 	scope.answer = "当前会话配置的模型是 " + scope.model + "。"
+	if scope.examples {
+		scope.answer = "可以这样问：“你是什么模型？”“你现在使用哪个模型？”“当前会话的模型名是什么？”"
+	}
 	if !strings.ContainsFunc(question, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
 		scope.answer = "The model configured for this conversation is " + scope.model + "."
+		if scope.examples {
+			scope.answer = `You can ask: "What model are you?", "Which model are you using?", or "What is the model configured for this conversation?"`
+		}
 	}
 	return scope, question != ""
 }
 
 func isModelIdentityQuestion(question string) bool {
-	normalized := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) || strings.ContainsRune("?？!！.。", r) {
-			return -1
-		}
-		return unicode.ToLower(r)
-	}, question)
+	normalized := normalizeIdentityQuestion(question)
+	for _, prefix := range []string{"请问", "请告诉我", "告诉我", "那么", "那"} {
+		normalized = strings.TrimPrefix(normalized, prefix)
+	}
+	normalized = strings.TrimSuffix(normalized, "呢")
+	if publicModelQuestionZH.MatchString(normalized) {
+		return true
+	}
 	switch normalized {
 	case "你是什么模型", "你使用了什么模型", "你使用什么模型", "你用的是什么模型", "你用的什么模型", "你用什么模型", "你的模型是什么", "你是哪个模型", "你现在是什么模型", "你是什么大模型", "你用的到底是什么模型", "用的到底是什么模型",
 		"whatmodelareyou", "whatmodelareyouusing", "whichmodelareyou", "whichmodelareyouusing", "whatisyourmodel", "whatmodeldoyouuse":
+		return true
+	case "你是gpt还是claude", "你是claude还是gpt", "当前会话的模型名是什么", "你的模型名是什么", "whatisthemodelconfiguredforthisconversation":
 		return true
 	}
 	return false
 }
 
 func (scope identityReplyScope) adapt(text string) (string, bool) {
+	trimmedText := strings.TrimSpace(text)
+	if trimmedText == "" || strings.HasPrefix(trimmedText, "```") || strings.HasPrefix(trimmedText, ">") || identityTextRefusal(text) {
+		return text, false
+	}
+	if scope.examples {
+		for _, prefix := range []string{"{", "["} {
+			if strings.HasPrefix(trimmedText, prefix) {
+				return text, false
+			}
+		}
+		return scope.answer, text != scope.answer
+	}
 	identity, remainder := text, ""
 	if boundary := identityParagraphBreak.FindStringIndex(text); boundary != nil {
 		identity, remainder = text[:boundary[0]], text[boundary[0]:]
@@ -123,7 +130,7 @@ func (scope identityReplyScope) adapt(text string) (string, bool) {
 	}
 	// A paragraph boundary alone does not prove that a mixed answer's first
 	// paragraph contains no task results. Unknown clauses must pass through.
-	if scope.mixed && !recognizedIdentityParagraph(identity) {
+	if scope.mixed && !recognizedIdentityParagraph(identity, scope.model) {
 		return text, false
 	}
 	trimmed := strings.TrimSpace(identity)
@@ -133,14 +140,21 @@ func (scope identityReplyScope) adapt(text string) (string, bool) {
 		}
 	}
 	lower := strings.ToLower(identity)
-	if !strings.Contains(lower, "hark") || !(strings.Contains(lower, "模型") || strings.Contains(lower, "model") || strings.Contains(lower, "我是") || strings.Contains(lower, "i am") || strings.Contains(lower, "i'm") || strings.Contains(lower, "assistant")) {
+	if !(scope.model != "" && strings.Contains(identity, scope.model) || strings.Contains(lower, "模型") || strings.Contains(lower, "model") || strings.Contains(lower, "配置名") || strings.Contains(lower, "我是") || strings.Contains(lower, "i am") || strings.Contains(lower, "i'm") || strings.Contains(lower, "assistant")) || scope.model == "" && !strings.Contains(lower, "hark") {
 		return text, false
+	}
+	if !scope.mixed {
+		remainder = trimIdentityDisclaimerParagraphs(remainder)
+		if scope.model != "" && correctlyStatesConfiguredModel(identity, scope.model) && !strings.Contains(lower, "hark") && !containsIdentityDisclaimer(identity) {
+			adapted := identity + remainder
+			return adapted, adapted != text
+		}
 	}
 	return scope.answer + remainder, true
 }
 
-func recognizedIdentityParagraph(text string) bool {
-	clauses := strings.FieldsFunc(text, func(r rune) bool { return strings.ContainsRune("，,。.;；\r\n", r) })
+func recognizedIdentityParagraph(text, model string) bool {
+	clauses := identityClauses(text)
 	if len(clauses) == 0 {
 		return false
 	}
@@ -153,10 +167,18 @@ func recognizedIdentityParagraph(text string) bool {
 		}, clause)
 		switch normalized {
 		case "hark会根据任务分配不同模型", "hark会按任务分配模型", "hark会按任务选择模型", "hark会根据任务把请求分配给不同的模型", "hark会根据任务请求分配给不同的模型", "hark会根据任务从多个模型中选择调用",
-			"我是hark", "我叫hark", "我无法确认当前实际模型", "我无法确认实际模型", "我无法确认当前具体是哪个模型在运行", "我没法确切知道这次用的是哪一个", "我没法确切知道现在用的是哪一个",
+			"我是hark", "我叫hark",
 			"iamhark", "i'mhark", "harkchoosesthemodel", "harkselectsamodelbasedonthetask", "harkroutesrequeststodifferentmodels":
 		default:
-			return false
+			known := isIdentityDisclaimer(clause)
+			if model != "" {
+				for _, prefix := range []string{"配置名是", "当前会话配置的模型是", "当前会话使用的是", "公开模型名是"} {
+					known = known || normalized == prefix+normalizeIdentityQuestion(model)
+				}
+			}
+			if !known {
+				return false
+			}
 		}
 	}
 	return true
