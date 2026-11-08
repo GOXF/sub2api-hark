@@ -155,7 +155,7 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 	if usageBody != nil {
 		resp = withUsageEstimate(in, usageBody, resp)
 	}
-	return resp, nil
+	return withMappedIdentityResponse(in, resp), nil
 }
 
 // Model is the only model name the Hark gateway accepts.
