@@ -52,6 +52,15 @@ Hark（hark.com）网页账号像其它 API Key 账号一样在 sub2api 里导�
 
 hark2api 的会话与 Project 状态存在 `$HARK_DATA_DIR`，默认 `$DATA_DIR/hark`（Docker 中为 `/app/data/hark`）。Cookie 只存在 sub2api 数据库里。
 
+## 模型列表与任务恢复
+
+- `/v1/models` 返回可供客户端选择的公开模型标识。账号映射里的 `*`、`claude-*` 是匹配规则，不是模型名称；Hark 的通配规则按现有 Claude 模型目录展开，精确配置的别名仍保留。
+- 被问到模型身份时使用客户端选择的公开标识；该名称不证明 Hark 底层实际供应商或架构。客户端应选择具体模型，而不是把通配规则作为模型提交。
+- 恢复会话与重新执行任务是两个动作：重载保留原 Conversation 和历史，不自动重发中断回合。继续任务应由用户明确触发，携带已保存的消息、工具调用及结果，避免重复执行已有副作用。
+- 上游返回 `cost_capped` 时保留 `upstream_budget_exhausted` 错误码，不当成普通生成失败，也不在宿主内静默换账号重放已接受的任务。生成前的 HTTP 429 仍使用原有限流处理。
+- 远端 Project 按账号隔离；账号或 Project 切换后的续接以客户端保存的完整历史为依据，不依赖归档的 Project 作为唯一上下文来源。
+- systemd 更新时先暂停新的网关入口并等待在途请求结束。程序的 HTTP 退出宽限期为五分钟，服务停止期限为六分钟；这不表示 Docker 或其它宿主已自动配置相同宽限期。
+
 ## 维护
 
 - 改动面：`internal/pkg/harkembed/`、`internal/service/hark.go`、平台登记（`domain/constants.go`、`domain/platforms.go`、
@@ -60,4 +69,4 @@ hark2api 的会话与 Project 状态存在 `$HARK_DATA_DIR`，默认 `$DATA_DIR/
 - `.github/workflows/hark-sync.yml`：定期合并官方 main、同步 hark2api、测试通过后推送并重建镜像；合并冲突时开 issue。
   需要仓库机密 `HARK2API_TOKEN`（能读 GOXF/hark2api 的 PAT）。
 - `.github/workflows/hark-image.yml`：镜像 `ghcr.io/goxf/sub2api-hark:latest`。
-- 手动同步 hark2api：`tools/sync-hark2api.sh <hark2api 目录>`。
+- 手动同步 hark2api：`tools/sync-hark2api.sh <hark2api 目录>`。同步从上游已提交的 `HEAD:gateway` 导出，再应用 `tools/harkembed-transport.patch` 保留本项目浏览器 TLS 适配；补丁冲突时停止，保留现有嵌入代码。

@@ -560,7 +560,7 @@ export default {
         claudeOAuthSystemPromptBlocks: 'Claude OAuth System Blocks',
         claudeOAuthSystemPromptBlocksHint: "Each block is saved as JSON with enabled, type, text, and optional cache_control. {'{'}billing_header{'}'} stays dynamic per request; the Claude Code identity and expansion prompts can be edited directly or restored from presets.",
         harkModelLabel: 'Hark Model Label',
-        harkModelLabelHint: 'Hark accounts map the client-requested model to Hark. When enabled, Hark requests get a short system note so that, when asked which model it is, the assistant says truthfully that the requested model was mapped to Hark (hark.com) and answered by a Hark-routed model, never claiming to be the requested model. Enabled by default; env HARK_MODEL_LABEL=off forces it off.',
+        harkModelLabelHint: 'Hark accounts forward requests through an internal transport. When enabled, model-identity answers use the model identifier selected by the client, not the internal transport name. The mapped identifier does not verify the underlying provider or architecture. Enabled by default; env HARK_MODEL_LABEL=off forces it off.',
         harkModelLabelPrompt: 'Hark Model Label Prompt',
         harkModelLabelPromptPlaceholder: 'Leave empty to use the built-in note.',
         harkModelLabelPromptHint: "{'{'}model{'}'} is replaced with the model the client originally requested. Clear it to restore the built-in note.",

@@ -324,6 +324,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
+	var budgetFailure error
 
 	writeLine := func(line string) {
 		if clientDisconnected {
@@ -364,6 +365,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			trimmedPayload := strings.TrimSpace(payload)
 			terminal.ObserveDataLine(trimmedPayload)
 			if trimmedPayload != "[DONE]" {
+				if account.IsHark() && isHarkBudgetExhausted([]byte(trimmedPayload)) {
+					budgetFailure = fmt.Errorf("upstream_budget_exhausted: %s", extractUpstreamErrorMessage([]byte(trimmedPayload)))
+				}
 				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
 				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)
 				if u := extractCCStreamUsage(payload); u != nil {
@@ -427,7 +431,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	// 上游在任何终止信号之前结束：连接被 reset（scanErr != nil）或干净 EOF。
 	// 两者都不能再记成功——此前统一返回 nil error，把上游截断伪装成
 	// `HTTP 200 + usage 0/0`，客户端收到半截回答且 Ops 侧完全无感。
-	if !clientAborted && terminal.IsTruncated(clientOutputStarted) {
+	if budgetFailure == nil && !clientAborted && terminal.IsTruncated(clientOutputStarted) {
 		cause := scanErr
 		if cause == nil {
 			cause = ErrOpenAIUpstreamStreamTruncated
@@ -451,7 +455,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	if scanErr == nil && !clientDisconnected && !clientOutputStarted {
-		if refusalDetector.IsSilentRefusal() {
+		if budgetFailure == nil && refusalDetector.IsSilentRefusal() {
 			return nil, newOpenAISilentRefusalFailoverError(c, account, requestID)
 		}
 		if len(pendingLines) > 0 {
@@ -473,6 +477,10 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		}
 	}
 
+	if budgetFailure != nil {
+		setOpsUpstreamError(c, http.StatusTooManyRequests, budgetFailure.Error(), "")
+		return resultWithUsage(), budgetFailure
+	}
 	return resultWithUsage(), nil
 }
 

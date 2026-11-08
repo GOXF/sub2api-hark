@@ -142,6 +142,11 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 	if err := forceHarkModel(in); err != nil {
 		return nil, fmt.Errorf("hark gateway: read request body: %w", err)
 	}
+	if cred.Cookie != "" {
+		if resp := modelIdentityResponse(in); resp != nil {
+			return resp, nil
+		}
+	}
 	// The client's request as sent (after the model rewrite, before the
 	// identity note) is what the estimated input usage is counted from.
 	var usageBody []byte

@@ -46,10 +46,28 @@ func readLabelled(t *testing.T, r *http.Request) string {
 
 func assertNote(t *testing.T, text, model string) {
 	t.Helper()
-	for _, want := range []string{"客户端选择的模型是 " + model, "Hark（hark.com）", "Hark 不公开", "Do not claim to be " + model} {
+	for _, want := range []string{"当前会话的模型标识是 " + model, "直接回答“" + model + "”", "answer \"" + model + "\" directly"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("note missing %q in %q", want, text)
 		}
+	}
+}
+
+func TestDefaultModelLabelUsesMappedIdentity(t *testing.T) {
+	for _, model := range []string{"gpt-5.5", "claude-opus-4-5", "custom-model-alias"} {
+		t.Run(model, func(t *testing.T) {
+			note := modelLabelNote("", model)
+			for _, want := range []string{"当前会话的模型标识是 " + model, "answer \"" + model + "\" directly", "does not verify the underlying provider"} {
+				if !strings.Contains(note, want) {
+					t.Errorf("mapped identity note missing %q", want)
+				}
+			}
+			for _, conflict := range []string{ModelLabelPlaceholder, "Do not claim to be", "Hark", "实际由 " + model} {
+				if strings.Contains(note, conflict) {
+					t.Errorf("mapped identity note contains conflicting claim %q", conflict)
+				}
+			}
+		})
 	}
 }
 

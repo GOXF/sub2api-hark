@@ -253,11 +253,16 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 			continue
 		}
 		status := messageStatus(m)
+		// A budget-capped job can also carry a generic error payload. Keep the
+		// structured status before that payload hides the budget/limit cause.
+		if status == "cost_capped" {
+			return projectReply{}, &upstreamError{429, "upstream_budget_exhausted", "Hark 回复任务因预算或额度上限终止（cost_capped）；未自动重试，请确认上限后显式继续"}
+		}
 		if len(m.Error) > 0 && string(m.Error) != "null" && string(m.Error) != "false" && string(m.Error) != `""` {
 			return projectReply{}, &upstreamError{502, "upstream_generation_failed", "Hark 回复任务返回错误"}
 		}
 		switch status {
-		case "failed", "error", "cancelled", "canceled", "interrupted", "cost_capped":
+		case "failed", "error", "cancelled", "canceled", "interrupted":
 			return projectReply{}, &upstreamError{502, "upstream_generation_failed", "Hark 回复任务失败或取消"}
 		case "completed", "complete", "finished", "done":
 			if m.Streaming != nil && *m.Streaming {

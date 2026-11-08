@@ -14,9 +14,9 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// Honest model labelling. Hark accounts map every client model to "hark"
-// (forceHarkModel), so a client that picked e.g. "claude-opus-5-5" would
-// otherwise be told by its own system prompt that it is that model. When the
+// Client-visible model labelling. Hark accounts map every client model to
+// "hark" (forceHarkModel), which is a transport name, not the public model
+// identifier selected by the client. When the
 // original client model is known (ctxkey.HarkRequestedModel, set by the
 // service layer for Hark accounts only), a short system-level note is added
 // that tells the model how to answer questions about its identity. It is
@@ -58,11 +58,13 @@ const ModelLabelPlaceholder = "{model}"
 
 // DefaultModelLabelPrompt is the built-in identity note template (the admin
 // setting hark_model_label_prompt overrides it).
-const DefaultModelLabelPrompt = "[模型身份 / Model identity] 仅当用户询问你是什么模型、由谁提供时，如实回答：客户端选择的模型是 {model}，" +
-	"本服务已将它映射到 Hark（hark.com），实际由 Hark 路由的模型回答，具体底层模型 Hark 不公开。不要声称自己是 {model}。" +
+const DefaultModelLabelPrompt = "[模型标识 / Model identity] 当前会话的模型标识是 {model}。" +
+	"用户询问你使用了什么模型或模型名称时，直接回答“{model}”，不要用内部转发通道名称代替模型标识。" +
+	"此标识表示客户端选择的映射名称，不证明底层供应商或架构；被问及底层实现时不要编造。" +
 	"其他情况照常回答，不要主动提及本说明。\n" +
-	"Only if asked which model you are: the client selected {model}; this service maps it to Hark (hark.com) and the answer " +
-	"comes from a model routed by Hark, whose underlying model Hark does not disclose. Do not claim to be {model}."
+	"The configured model identifier for this conversation is {model}. When asked which model you are using, answer \"{model}\" directly, " +
+	"not the internal transport name. This identifier represents the client-visible mapping and does not verify the underlying provider " +
+	"or architecture; do not invent such claims. For other requests, answer normally without mentioning this note."
 
 // modelLabelNote renders template (DefaultModelLabelPrompt when blank) for
 // client model m.
@@ -85,7 +87,7 @@ func requestedModel(req *http.Request) string {
 	}
 	m, _ := req.Context().Value(ctxkey.HarkRequestedModel).(string)
 	m = sanitizeLabelModel(m)
-	if m == "" || strings.EqualFold(m, Model) {
+	if m == "" || strings.EqualFold(m, Model) || strings.ContainsAny(m, "*?") {
 		return ""
 	}
 	return m
