@@ -113,7 +113,7 @@ func TestIdentityQuestionsUseUpstreamGeneration(t *testing.T) {
 
 func TestDefaultModelLabelAllowsNaturalAnswers(t *testing.T) {
 	note := modelLabelNote("", "claude-opus-5-5")
-	for _, want := range []string{"claude-opus-5-5", "naturally", "unless the user requests", "answer every part"} {
+	for _, want := range []string{"claude-opus-5-5", "naturally", "unless the user requests", "answer every part", "public API configuration", "不要只回答平台品牌"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("natural-answer guidance missing %q", want)
 		}
