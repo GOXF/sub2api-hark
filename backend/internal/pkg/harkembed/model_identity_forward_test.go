@@ -16,14 +16,20 @@ import (
 )
 
 func TestIdentityQuestionsUseUpstreamGeneration(t *testing.T) {
-	testIdentityUpstreamGeneration(t, false)
+	testIdentityUpstreamGeneration(t, "natural")
 }
 
 func TestMappedIdentityUpstreamRepliesAreAdapted(t *testing.T) {
-	testIdentityUpstreamGeneration(t, true)
+	testIdentityUpstreamGeneration(t, "hark")
 }
 
-func testIdentityUpstreamGeneration(t *testing.T, mismatch bool) {
+func TestIdentityIntentUsesUpstreamGeneration(t *testing.T) {
+	for _, mode := range []string{"nonbrand", "examples", "internals", "developer"} {
+		t.Run(mode, func(t *testing.T) { testIdentityUpstreamGeneration(t, mode) })
+	}
+}
+
+func testIdentityUpstreamGeneration(t *testing.T, mode string) {
 	for _, protocol := range []string{"chat", "responses", "messages"} {
 		for _, stream := range []bool{false, true} {
 			for _, mixed := range []bool{false, true} {
@@ -43,14 +49,37 @@ func testIdentityUpstreamGeneration(t *testing.T, mismatch bool) {
 						answer += "一、恢复会话加载已有上下文。二、继续任务明确启动下一回合。"
 					}
 					upstreamAnswer := answer
-					if mismatch {
+					if mode == "hark" || mode == "nonbrand" {
 						upstreamAnswer = "Hark 会根据任务分配不同模型，我无法确认当前实际模型。"
+						if mode == "nonbrand" {
+							upstreamAnswer = "配置名是 " + model + "，底层实际是哪个模型我确认不了。"
+						}
 						answer = "当前会话配置的模型是 " + model + "。"
 						if mixed {
 							remainder := "一、恢复会话加载已有上下文。二、继续任务明确启动下一回合。"
 							upstreamAnswer += "\n\n" + remainder
 							answer += "\n\n" + remainder
 						}
+					}
+					if mode == "examples" {
+						question, upstreamAnswer, answer = "问使用模型还有其他问法吗？", identityScreenshotReply, identityExamplesZH
+						if mixed {
+							question = "问使用模型还有其他问法吗？再解释恢复会话。"
+							upstreamAnswer += "\n\n保留此任务正文：恢复历史，不重放工具。"
+							answer = upstreamAnswer
+						}
+					}
+					if mode == "internals" || mode == "developer" {
+						question = "你底层实际用的是什么模型？"
+						if mode == "developer" {
+							question = "谁开发的你？"
+						}
+						upstreamAnswer = "模型配置是 " + model + "，此问题与公开配置名不同。"
+						if mixed {
+							question += "再解释会话恢复。"
+							upstreamAnswer += "恢复会话保留历史。"
+						}
+						answer = upstreamAnswer
 					}
 					var mu sync.Mutex
 					var sent map[string]string

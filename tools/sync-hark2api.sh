@@ -11,8 +11,8 @@ trap 'rm -rf -- "$stage"' EXIT
 git -c core.autocrlf=false -C "$src" archive HEAD:gateway | tar -x -C "$stage"
 rm -f "$stage"/*_test.go
 # Keep the sub2api-owned transport without silently overwriting upstream edits.
-git -c core.autocrlf=false -C "$stage" apply --check "$overlay"
-git -c core.autocrlf=false -C "$stage" apply "$overlay"
+git -c core.autocrlf=false -C "$stage" apply --unidiff-zero --check "$overlay"
+git -c core.autocrlf=false -C "$stage" apply --unidiff-zero "$overlay"
 rm -rf "$dst"
 mkdir -p "$dst"
 cp -R "$stage/." "$dst/"

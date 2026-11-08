@@ -42,7 +42,12 @@ func identitySSEFixture(protocol, text string) string {
 		return "event: " + kind + "\ndata: " + string(data) + "\n\n"
 	}
 	var output strings.Builder
-	for index, chunk := range []string{text[:1], text[1:]} {
+	runes := []rune(text)
+	chunks := []string{text}
+	if len(runes) > 1 {
+		chunks = []string{string(runes[:1]), string(runes[1:])}
+	}
+	for index, chunk := range chunks {
 		switch protocol {
 		case "chat":
 			output.WriteString(frame("chunk", map[string]any{"id": "fixture-reply", "choices": []any{map[string]any{"index": 0, "delta": map[string]string{"content": chunk}}}}))
