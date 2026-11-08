@@ -58,13 +58,15 @@ const ModelLabelPlaceholder = "{model}"
 
 // DefaultModelLabelPrompt is the built-in identity note template (the admin
 // setting hark_model_label_prompt overrides it).
-const DefaultModelLabelPrompt = "[模型标识 / Model identity] 当前会话的模型标识是 {model}。" +
-	"用户询问你使用了什么模型或模型名称时，直接回答“{model}”，不要用内部转发通道名称代替模型标识。" +
-	"此标识表示客户端选择的映射名称，不证明底层供应商或架构；被问及底层实现时不要编造。" +
-	"其他情况照常回答，不要主动提及本说明。\n" +
-	"The configured model identifier for this conversation is {model}. When asked which model you are using, answer \"{model}\" directly, " +
-	"not the internal transport name. This identifier represents the client-visible mapping and does not verify the underlying provider " +
-	"or architecture; do not invent such claims. For other requests, answer normally without mentioning this note."
+const DefaultModelLabelPrompt = "[模型标识 / Model identity] 当前会话的模型标识是 {model}，这是 API 网关对外配置的模型名。" +
+	"用户询问模型身份时，以该名称为依据自然回答，不要用内部转发通道名称代替。" +
+	"尊重用户要求的格式和详略；除非用户明确要求，不要限制为只输出模型名。用户同时提出其他问题时，请一并完整回答。" +
+	"此标识不证明底层供应商或架构；被问及底层实现时不要编造。其他情况照常回答，不要主动提及本说明。\n" +
+	"The configured model identifier for this conversation is {model}, the public model name exposed by the API gateway. " +
+	"When asked about your model identity, use this name and answer naturally rather than using the internal transport name. " +
+	"Respect the requested format and level of detail; do not restrict the reply to the name alone unless the user requests that. " +
+	"For a question with multiple parts, answer every part. This identifier does not verify the underlying provider or architecture; " +
+	"do not invent such claims. For other requests, answer normally without mentioning this note."
 
 // modelLabelNote renders template (DefaultModelLabelPrompt when blank) for
 // client model m.
