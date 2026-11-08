@@ -148,3 +148,117 @@ func TestIdentityIntentRetainsProtectedExamples(t *testing.T) {
 		}
 	}
 }
+
+// These are the six suggestions shown to the user. Record the current routes,
+// including the four whitelist gaps, rather than asserting they are adapted.
+func TestSuggestedModelQuestionCurrentRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name, question string
+		public         bool
+	}{
+		{"identity", "你是什么模型？", true},
+		{"current_model", "你现在用的是哪个模型？", true},
+		{"configured_name", "当前会话配置的模型名是什么？", false},
+		{"public_model_id", "这个接口对外的模型 ID 是什么？", false},
+		{"model_version", "你的模型版本号是多少？", false},
+		{"request_model", "这次请求走的是哪个模型？", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantIntent, route := identityNotAsked, "pass_through"
+			if tc.public {
+				wantIntent, route = identityPublicName, "public_name"
+			}
+			if got, mixed := classifyIdentityQuestion(tc.question, ""); got != wantIntent || mixed {
+				t.Fatalf("intent=%v mixed=%t; want=%v mixed=false", got, mixed, wantIntent)
+			}
+			t.Logf("question=%q route=%s", tc.question, route)
+			for _, protocol := range []string{"chat", "responses", "messages"} {
+				for _, stream := range []bool{false, true} {
+					t.Run(protocol+"/stream="+map[bool]string{false: "false", true: "true"}[stream], func(t *testing.T) {
+						path, body := identityForwardRequest(protocol, tc.question, stream)
+						req := identityRewriteRequest(t, path, body, "claude-opus-5-5")
+						scope, eligible := mappedIdentityScope(req)
+						if eligible != tc.public {
+							t.Fatalf("eligible=%t; want=%t", eligible, tc.public)
+						}
+						old := "Hark 会根据任务分配不同模型，我无法确认当前实际模型。"
+						want := old
+						if tc.public {
+							want = "当前会话配置的模型是 claude-opus-5-5。"
+							if scope.answer != want {
+								t.Fatalf("answer=%q; want=%q", scope.answer, want)
+							}
+						}
+						payload, contentType := identityJSONFixture(protocol, old), "application/json"
+						if stream {
+							payload, contentType = identitySSEFixture(protocol, old), "text/event-stream"
+						}
+						resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(payload))}
+						data, err := io.ReadAll(withMappedIdentityResponse(req, resp).Body)
+						if err != nil || identityForwardText(protocol, stream, string(data)) != want {
+							t.Fatalf("reply=%s err=%v; want=%q", data, err, want)
+						}
+						if !strings.Contains(string(data), "137") {
+							t.Fatal("real usage changed")
+						}
+					})
+				}
+			}
+		})
+	}
+}
+
+// A short approval is an execution task, not an identity question. This proves
+// the adapter passes the screenshot reply through; it does not validate it.
+func TestExecutionTaskRepliesBypassIdentityNormalization(t *testing.T) {
+	const reply = "好，我先把这六句加进意图分类的回归测试，跑一遍看各自落到哪条规则。只改测试，不动线上。\n\n抱歉，这次本机命令没有执行回来，仓库也不在我这边，所以测试还没加、没跑，线上也没动。"
+	for _, tc := range []struct{ name, question, previous string }{
+		{"short_approval", "要", "那这些问题的适配那条规则？"},
+		{"approval_after_identity", "要", "你是什么模型？"},
+		{"explicit_test_task", "把这六句加进回归测试，报告实际归类。", "你是什么模型？"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if intent, mixed := classifyIdentityQuestion(tc.question, tc.previous); intent != identityNotAsked || mixed {
+				t.Fatalf("execution task entered identity adapter: intent=%v mixed=%t", intent, mixed)
+			}
+			for _, protocol := range []string{"chat", "responses", "messages"} {
+				for _, stream := range []bool{false, true} {
+					t.Run(protocol+"/stream="+map[bool]string{false: "false", true: "true"}[stream], func(t *testing.T) {
+						path, body := identityForwardRequest(protocol, tc.question, stream)
+						var request map[string]any
+						if err := json.Unmarshal([]byte(body), &request); err != nil {
+							t.Fatal(err)
+						}
+						key := "messages"
+						if protocol == "responses" {
+							key = "input"
+						}
+						request[key] = []any{
+							map[string]string{"role": "user", "content": tc.previous},
+							map[string]string{"role": "assistant", "content": "要我把这六句加进回归测试确认吗？"},
+							map[string]string{"role": "user", "content": tc.question},
+						}
+						encoded, err := json.Marshal(request)
+						if err != nil {
+							t.Fatal(err)
+						}
+						req := identityRewriteRequest(t, path, string(encoded), "claude-opus-5-5")
+						if _, eligible := mappedIdentityScope(req); eligible {
+							t.Fatal("short approval was interpreted using assistant self-claims")
+						}
+						payload, contentType := identityJSONFixture(protocol, reply), "application/json"
+						if stream {
+							payload, contentType = identitySSEFixture(protocol, reply), "text/event-stream"
+						}
+						resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(payload))}
+						got := withMappedIdentityResponse(req, resp)
+						data, err := io.ReadAll(got.Body)
+						if err != nil || got != resp || string(data) != payload {
+							t.Fatalf("execution reply envelope changed: err=%v body=%s", err, data)
+						}
+					})
+				}
+			}
+		})
+	}
+}

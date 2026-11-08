@@ -70,7 +70,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 		return err
 	}
 	text, files := renderTurn(plan.send)
-	text += toolPrompt(v.Tools, v.ToolChoice)
+	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
 	if len(files) > maxFilesPerRequest {
 		return &statusInputError{400, "too_many_files", fmt.Sprintf("单轮最多上传 %d 个附件", maxFilesPerRequest)}
 	}
@@ -343,6 +343,10 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			l.ToolCalls = len(res.ToolCalls)
 		})
 	}()
+	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
+		s.turnFailed(w, r, ctx, err, format)
+		return
+	}
 	if !v.Stream {
 		err := s.runTurn(ctx, r, v, res, turnHooks{})
 		if err != nil {
@@ -350,6 +354,10 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			return
 		}
 		s.applyToolCalls(v, res)
+		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
+			s.turnFailed(w, r, ctx, err, format)
+			return
+		}
 		setTurnHeaders(w, res)
 		w.Header().Set("X-Hark-Project-Archived", strconv.FormatBool(res.Archived))
 		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
@@ -396,7 +404,9 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			if len(v.Tools) > 0 {
 				partial = toolSafePrefix(partial)
 			}
-			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
+			// A required-tool turn is validated before releasing assistant text.
+			// Keepalives still flow, and ordinary auto/none turns stay incremental.
+			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 				format.delta(emit, partial[len(emitted):])
 				emitted = partial
 				return
@@ -417,6 +427,10 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	err := s.runTurn(ctx, r, v, res, hooks)
 	mu.Lock()
 	defer mu.Unlock()
+	if err == nil {
+		s.applyToolCalls(v, res)
+		err = validateClientToolResult(v, res.ToolCalls)
+	}
 	if err != nil {
 		if !started {
 			s.turnFailed(w, r, ctx, err, format)
@@ -434,7 +448,6 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 		}
 		return
 	}
-	s.applyToolCalls(v, res)
 	final := res.Text
 	if len(res.ToolCalls) > 0 && strings.HasPrefix(emitted, final) {
 		final = emitted // 已发出的文字里没有工具块，保持一致

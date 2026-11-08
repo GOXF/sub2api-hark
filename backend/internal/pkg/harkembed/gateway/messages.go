@@ -347,7 +347,8 @@ func (s *Server) normalizeMessages(b []byte) (chatRequest, string, error) {
 		return v, "", err
 	}
 	v.Tools, v.ToolChoice, v.ToolsDeclared = tools, parseAnthropicToolChoice(object["tool_choice"]), len(tools)
-	if v.ToolChoice == "none" {
+	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
+	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
 		v.Tools = nil
 	}
 	if v.SessionID == "" {

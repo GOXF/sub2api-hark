@@ -1513,7 +1513,7 @@ func applyOpenAIStreamFailedErrorPassthroughRule(
 	payload []byte,
 	failedMessage string,
 ) (status int, errType string, errMsg string, matched bool) {
-	if isHarkBudgetExhausted(payload) {
+	if isHarkAcceptedTurnFailure(payload) {
 		return 0, "", "", false
 	}
 	ruleBody := openAIStreamFailedEventPassthroughBody(payload, failedMessage)
@@ -1530,7 +1530,7 @@ func applyOpenAIStreamFailedErrorPassthroughRule(
 }
 
 func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool {
-	if isHarkBudgetExhausted(payload) {
+	if isHarkAcceptedTurnFailure(payload) {
 		return false
 	}
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
@@ -1585,7 +1585,7 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 }
 
 func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
-	if isHarkBudgetExhausted(payload) {
+	if isHarkAcceptedTurnFailure(payload) {
 		return false
 	}
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
