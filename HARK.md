@@ -74,3 +74,22 @@ hark2api 的会话与 Project 状态存在 `$HARK_DATA_DIR`，默认 `$DATA_DIR/
   需要仓库机密 `HARK2API_TOKEN`（能读 GOXF/hark2api 的 PAT）。
 - `.github/workflows/hark-image.yml`：镜像 `ghcr.io/goxf/sub2api-hark:latest`。
 - 手动同步 hark2api：`tools/sync-hark2api.sh <hark2api 目录>`。同步从上游已提交的 `HEAD:gateway` 导出，再应用 `tools/harkembed-transport.patch` 保留本项目浏览器 TLS 适配；补丁冲突时停止，保留现有嵌入代码。
+# 独立处理状态（opt-in）
+
+流式请求可携带 `"hark_status": true`（或直连网关时 `X-Hark-Status: true`）。未启用时不额外订阅上游状态，也不改变既有 SSE；该字段不会发给 Hark 的消息提交接口。
+
+网关额外发送独立的 SSE 帧，不将其拼入 assistant content、工具参数或工具回执：
+
+```text
+event: hark.status
+data: {"type":"hark.status","status":"processing","conversation_id":"PROJECT","request_id":"USER_MESSAGE","message_id":"ASSISTANT_MESSAGE","line":"正在查找您的文件。","sequence":1}
+```
+
+- `processing`：来自本次关联消息的真实运行状态和公开 `narration.line`；`line_key` 若上游提供则保留。阶段文案动态透传，不读取私有 thought/reasoning。
+- `waiting_for_user`：来自本次 request 的 `awaitsPerson` 或关联回复的 `inputNeeded`，清空旧阶段文案；同一请求的迟到工作事件不将其覆盖。
+- `ended`：本次流已结束，不表示业务任务成功。`reason=error` 保留真实失败，`reason=stream_ended` 表示流收尾；客户端本地取消可标记 `reason=cancelled`。
+- `sequence` 是每个 request 内的递增状态事件序号。客户端还须绑定自己的会话/回合/模型请求，避免旧事件跨请求、跨会话覆盖。状态只供展示，不作为已经执行工具的证据。
+
+状态源优先使用 `/api/sync/conversation` 的 snapshot/patch；同步失败不触发模型重发或换号，并恢复历史消息中公开 narration 的回退。结束前只对已有状态连接给予最多 200ms 的收尾窗口；没有真实阶段时保持缺失。非流式响应保持原格式。
+
+客户端应在独立区域显示“处理状态”，仅对状态展示文案去除品牌字样；不替换回复正文，也不把“等待补充”显示为“任务成功”。

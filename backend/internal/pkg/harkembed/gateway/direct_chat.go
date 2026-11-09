@@ -132,8 +132,10 @@ type harkMessage struct {
 	Presentation struct {
 		Kind string `json:"kind"`
 	} `json:"presentation"`
-	Onboarding  json.RawMessage `json:"onboarding"`
-	Attachments []harkFile      `json:"attachments"`
+	Onboarding  json.RawMessage  `json:"onboarding"`
+	Narration   *statusNarration `json:"narration"`
+	InputNeeded bool             `json:"inputNeeded"`
+	Attachments []harkFile       `json:"attachments"`
 }
 
 // fetchHistory reads /api/messages/history and accepts both shapes seen in
@@ -425,7 +427,8 @@ type turnHooks struct {
 	// accepted runs once Hark confirmed the message; streaming starts here.
 	accepted func()
 	// poll runs after every history read with the visible text so far.
-	poll func(partial string)
+	poll   func(partial string)
+	status func(turnStatus)
 }
 
 func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, payload map[string]any, interval time.Duration, hooks turnHooks) (projectReply, error) {
@@ -450,16 +453,41 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 	if hooks.accepted != nil {
 		hooks.accepted()
 	}
+	var statusTracker *turnStatusTracker
+	var statusDone chan struct{}
+	if hooks.status != nil {
+		statusTracker = newTurnStatusTracker(cid, expected, requestID, hooks.status)
+		statusCtx, stopStatus := context.WithCancel(ctx)
+		statusDone = make(chan struct{})
+		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
+		defer func() { stopStatus(); <-statusDone }()
+	}
 	for {
 		messages, err := s.fetchHistory(ctx, cookie, cid)
 		if err != nil {
 			return projectReply{}, err
+		}
+		if statusTracker != nil {
+			statusTracker.history(messages)
 		}
 		reply, err := completedProjectReply(messages, expected, requestID)
 		if err != nil {
 			return reply, err
 		}
 		if reply.Text != "" || len(reply.Attachments) > 0 {
+			if statusTracker != nil {
+				// A job can finish just before the request-level awaiting-person
+				// patch arrives. Give the existing feed a bounded drain, not a
+				// replay or an unbounded wait for optional UI metadata.
+				timer := time.NewTimer(200 * time.Millisecond)
+				select {
+				case <-statusTracker.settled:
+				case <-statusDone:
+				case <-timer.C:
+				case <-ctx.Done():
+				}
+				timer.Stop()
+			}
 			return reply, nil
 		}
 		if hooks.poll != nil {
