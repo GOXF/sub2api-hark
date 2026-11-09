@@ -1,3 +1,11 @@
+diff --git a/attachments.go b/attachments.go
+--- a/attachments.go
++++ b/attachments.go
+@@ -313 +313,3 @@
+-	resp, err := s.clientFor(cookie, 0, false).Do(req)
++	client := s.uploadClientFor(cookie)
++	defer client.CloseIdleConnections()
++	resp, err := client.Do(req)
 diff --git a/browser_tls.go b/browser_tls.go
 new file mode 100644
 --- /dev/null
@@ -162,49 +170,155 @@ new file mode 100644
 +	_ = conn.SetDeadline(time.Time{})
 +	return conn, nil
 +}
-diff --git a/source.go b/source.go
---- a/source.go
-+++ b/source.go
-@@ -94,8 +94,7 @@
- 	if err != nil {
- 		return nil
- 	}
--	t := http.DefaultTransport.(*http.Transport).Clone()
--	t.Proxy = http.ProxyURL(u)
-+	t := browserTransport(u)
- 	s.proxyCache.m[raw] = t
- 	return t
- }
-@@ -143,7 +142,7 @@
- 		ua = DefaultUserAgent
- 	}
- 	base := s.client.Transport
--	if direct {
-+	if direct || (proxy == "" && s.upstreamProxy == "") {
- 		base = s.directTransport()
- 	} else if proxy != "" {
- 		if t := s.transportForProxy(proxy); t != nil {
+diff --git a/chat.go b/chat.go
+--- a/chat.go
++++ b/chat.go
+@@ -73 +73 @@
+-	text += toolPrompt(v.Tools, v.ToolChoice)
++	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
+@@ -147 +147 @@
+-	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
++	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
+@@ -345,0 +346,4 @@
++	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
++		s.turnFailed(w, r, ctx, err, format)
++		return
++	}
+@@ -352,0 +357,4 @@
++		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
++			s.turnFailed(w, r, ctx, err, format)
++			return
++		}
+@@ -363,0 +372 @@
++	var latestStatus turnStatus
+@@ -399 +408,3 @@
+-			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
++			// A required-tool turn is validated before releasing assistant text.
++			// Keepalives still flow, and ordinary auto/none turns stay incremental.
++			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
+@@ -416,0 +428,11 @@
++	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
++		hooks.status = func(status turnStatus) {
++			mu.Lock()
++			defer mu.Unlock()
++			if !started || r.Context().Err() != nil {
++				return
++			}
++			latestStatus = status
++			emit("hark.status", status)
++		}
++	}
+@@ -419,0 +442,4 @@
++	if err == nil {
++		s.applyToolCalls(v, res)
++		err = validateClientToolResult(v, res.ToolCalls)
++	}
+@@ -425,0 +452,5 @@
++		if latestStatus.Type != "" && r.Context().Err() == nil {
++			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
++			latestStatus.Sequence++
++			emit("hark.status", latestStatus)
++		}
+@@ -437 +467,0 @@
+-	s.applyToolCalls(v, res)
+@@ -451,0 +482,5 @@
++	}
++	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" {
++		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
++		latestStatus.Sequence++
++		emit("hark.status", latestStatus)
+diff --git a/chat_input.go b/chat_input.go
+--- a/chat_input.go
++++ b/chat_input.go
+@@ -63 +63,2 @@
+-	Bridge bool `json:"hark_bridge,omitempty"`
++	Bridge       bool `json:"hark_bridge,omitempty"`
++	StatusEvents bool `json:"hark_status,omitempty"`
+@@ -66,0 +68,2 @@
++	// Preserve an explicit name even when it is a mode word (auto/none/required).
++	ToolChoiceNamed bool `json:"-"`
+@@ -296,0 +300,5 @@
++	if raw, ok := object["hark_status"]; ok {
++		if json.Unmarshal(raw, &v.StatusEvents) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
++			return inputError("invalid_status_events", "hark_status must be boolean")
++		}
++	}
+@@ -303 +311,2 @@
+-	if v.ToolChoice == "none" {
++	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
++	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
+@@ -329 +338 @@
+-		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "input", "instructions", "user":
++		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "hark_status", "input", "instructions", "user":
+diff --git a/direct_chat.go b/direct_chat.go
+--- a/direct_chat.go
++++ b/direct_chat.go
+@@ -135,2 +135,4 @@
+-	Onboarding  json.RawMessage `json:"onboarding"`
+-	Attachments []harkFile      `json:"attachments"`
++	Onboarding  json.RawMessage  `json:"onboarding"`
++	Narration   *statusNarration `json:"narration"`
++	InputNeeded bool             `json:"inputNeeded"`
++	Attachments []harkFile       `json:"attachments"`
+@@ -428 +430,2 @@
+-	poll func(partial string)
++	poll   func(partial string)
++	status func(turnStatus)
+@@ -452,0 +456,9 @@
++	var statusTracker *turnStatusTracker
++	var statusDone chan struct{}
++	if hooks.status != nil {
++		statusTracker = newTurnStatusTracker(cid, expected, requestID, hooks.status)
++		statusCtx, stopStatus := context.WithCancel(ctx)
++		statusDone = make(chan struct{})
++		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
++		defer func() { stopStatus(); <-statusDone }()
++	}
+@@ -457,0 +470,3 @@
++		if statusTracker != nil {
++			statusTracker.history(messages)
++		}
+@@ -462,0 +478,13 @@
++			if statusTracker != nil {
++				// A job can finish just before the request-level awaiting-person
++				// patch arrives. Give the existing feed a bounded drain, not a
++				// replay or an unbounded wait for optional UI metadata.
++				timer := time.NewTimer(200 * time.Millisecond)
++				select {
++				case <-statusTracker.settled:
++				case <-statusDone:
++				case <-timer.C:
++				case <-ctx.Done():
++				}
++				timer.Stop()
++			}
+diff --git a/messages.go b/messages.go
+--- a/messages.go
++++ b/messages.go
+@@ -337 +337 @@
+-	for _, k := range []string{"stream", "session_id", "session_end", "hark_bridge"} {
++	for _, k := range []string{"stream", "session_id", "session_end", "hark_bridge", "hark_status"} {
+@@ -350 +350,2 @@
+-	if v.ToolChoice == "none" {
++	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
++	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
 diff --git a/proxy_pool.go b/proxy_pool.go
 --- a/proxy_pool.go
 +++ b/proxy_pool.go
-@@ -96,8 +96,7 @@
- 	if t := s.proxyCache.m[ProxyDirect]; t != nil {
- 		return t
- 	}
+@@ -99,2 +99 @@
 -	t := http.DefaultTransport.(*http.Transport).Clone()
 -	t.Proxy = nil
 +	t := browserTransport(nil)
- 	s.proxyCache.m[ProxyDirect] = t
- 	return t
- }
-diff --git a/attachments.go b/attachments.go
---- a/attachments.go
-+++ b/attachments.go
-@@ -313 +313,3 @@
--	resp, err := s.clientFor(cookie, 0, false).Do(req)
-+	client := s.uploadClientFor(cookie)
-+	defer client.CloseIdleConnections()
-+	resp, err := client.Do(req)
+diff --git a/source.go b/source.go
+--- a/source.go
++++ b/source.go
+@@ -97,2 +97 @@
+-	t := http.DefaultTransport.(*http.Transport).Clone()
+-	t.Proxy = http.ProxyURL(u)
++	t := browserTransport(u)
+@@ -146 +145 @@
+-	if direct {
++	if direct || (proxy == "" && s.upstreamProxy == "") {
 diff --git a/storage_tls.go b/storage_tls.go
 new file mode 100644
 --- /dev/null
@@ -362,83 +476,619 @@ new file mode 100644
 +		t.Fatal("storage client's wrapper swallowed idle connection cleanup")
 +	}
 +}
-diff --git a/chat.go b/chat.go
---- a/chat.go
-+++ b/chat.go
-@@ -73 +73 @@
--	text += toolPrompt(v.Tools, v.ToolChoice)
-+	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
-@@ -345,0 +346,4 @@
-+	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
-+		s.turnFailed(w, r, ctx, err, format)
-+		return
-+	}
-@@ -352,0 +357,4 @@
-+		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
-+			s.turnFailed(w, r, ctx, err, format)
-+			return
-+		}
-@@ -399 +407,3 @@
--			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-+			// A required-tool turn is validated before releasing assistant text.
-+			// Keepalives still flow, and ordinary auto/none turns stay incremental.
-+			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -419,0 +430,4 @@
-+	if err == nil {
-+		s.applyToolCalls(v, res)
-+		err = validateClientToolResult(v, res.ToolCalls)
-+	}
-@@ -437 +450,0 @@
--	s.applyToolCalls(v, res)
-diff --git a/chat_input.go b/chat_input.go
---- a/chat_input.go
-+++ b/chat_input.go
-@@ -66,0 +67,2 @@
-+	// Preserve an explicit name even when it is a mode word (auto/none/required).
-+	ToolChoiceNamed bool `json:"-"`
-@@ -303 +305,2 @@
--	if v.ToolChoice == "none" {
-+	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
-+	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
-diff --git a/messages.go b/messages.go
---- a/messages.go
-+++ b/messages.go
-@@ -350 +350,2 @@
--	if v.ToolChoice == "none" {
-+	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
-+	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
-diff --git a/tools.go b/tools.go
---- a/tools.go
-+++ b/tools.go
-@@ -145,0 +146,3 @@
-+		if m.Type == "required" || m.Type == "auto" || m.Type == "none" {
-+			return m.Type
-+		}
-@@ -151,2 +154,2 @@
--func toolPrompt(tools []toolSpec, choice string) string {
--	if len(tools) == 0 || choice == "none" {
-+func toolPrompt(tools []toolSpec, choice string, named bool) string {
-+	if len(tools) == 0 || choice == "none" && !named {
-@@ -177,3 +180,5 @@
--	switch choice {
--	case "auto", "":
--	case "required":
-+	switch {
-+	case named:
-+		b.WriteString("- This turn you MUST call the tool \"" + choice + "\".\n")
-+	case choice == "auto" || choice == "":
-+	case choice == "required":
-@@ -208,0 +214,10 @@
-+}
-+
-+func isNamedToolChoice(raw json.RawMessage) bool {
-+	var selection struct {
-+		Name     string `json:"name"`
-+		Function struct {
-+			Name string `json:"name"`
-+		} `json:"function"`
-+	}
-+	return json.Unmarshal(raw, &selection) == nil && (selection.Name != "" || selection.Function.Name != "")
+diff --git a/testdata/turn_status_trace.json b/testdata/turn_status_trace.json
+new file mode 100644
+--- /dev/null
++++ b/testdata/turn_status_trace.json
+@@ -0,0 +1,608 @@
++[
++  {
++    "type": "snapshot",
++    "data": {
++      "requests": {
++        "10eeb335-e36e-49da-91b8-b572cd60d0c5": {
++          "messageId": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "state": "completed",
++          "revision": 1,
++          "finalMessageId": "c32b07f8-a5b0-4493-91c2-f8d25d2e5ff4",
++          "titleMessages": 1
++        }
++      },
++      "threads": [],
++      "pendingConnections": {},
++      "connectedProviders": [],
++      "reconnectProviders": [],
++      "proactiveTasks": [],
++      "patchSeq": 9,
++      "narration": {
++        "visible": true,
++        "answered": true,
++        "since": 1794207731644
++      },
++      "activeActivity": [],
++      "log": [
++        {
++          "id": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "kind": "message"
++        },
++        {
++          "id": "594606b2-64f1-42a5-a0b4-5f90c5197436",
++          "kind": "message"
++        },
++        {
++          "id": "c32b07f8-a5b0-4493-91c2-f8d25d2e5ff4",
++          "kind": "message"
++        },
++        {
++          "id": "ccf54e5a-37dd-4414-a6ee-9b10fe254a23",
++          "kind": "message"
++        }
++      ],
++      "messages": {
++        "10eeb335-e36e-49da-91b8-b572cd60d0c5": {
++          "id": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "role": "user",
++          "content": "这是独立的状态协议验证项目。不要访问其他项目、文件桥或外部服务。请只回复“准备好接收合成附件”，随后等待我上传测试文件。",
++          "timestamp": 1794207725434,
++          "source": "web"
++        },
++        "594606b2-64f1-42a5-a0b4-5f90c5197436": {
++          "id": "594606b2-64f1-42a5-a0b4-5f90c5197436",
++          "role": "assistant",
++          "content": "",
++          "timestamp": 1794207725516,
++          "triggeredByMessageId": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "isStreaming": false,
++          "source": "web",
++          "jobStatus": "completed"
++        },
++        "c32b07f8-a5b0-4493-91c2-f8d25d2e5ff4": {
++          "id": "c32b07f8-a5b0-4493-91c2-f8d25d2e5ff4",
++          "role": "assistant",
++          "content": "准备好接收合成附件",
++          "timestamp": 1794207731644,
++          "triggeredByMessageId": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "answersMessageIds": [
++            "10eeb335-e36e-49da-91b8-b572cd60d0c5"
++          ],
++          "agentId": "f5d46c48-518a-44e0-be34-93a1d1288e8b",
++          "isStreaming": false,
++          "source": "send_bubble",
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        "ccf54e5a-37dd-4414-a6ee-9b10fe254a23": {
++          "id": "ccf54e5a-37dd-4414-a6ee-9b10fe254a23",
++          "role": "assistant",
++          "content": "",
++          "timestamp": 1794207732239,
++          "triggeredByMessageId": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "isStreaming": false,
++          "source": "web",
++          "jobStatus": "completed"
++        }
++      },
++      "windows": {},
++      "asks": {}
++    },
++    "hasMore": false,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "entry_add",
++        "afterId": "ccf54e5a-37dd-4414-a6ee-9b10fe254a23",
++        "value": {
++          "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++          "role": "user",
++          "content": "只处理本次上传的合成 CSV：计算数据行数、value 列总和、每个 group 的行数。可以使用你自带的文件处理能力。不要访问其他项目，不要调用已登记的外部 MCP 文件桥，不要修改任何文件或部署。请返回计算结果。",
++          "timestamp": 1794207819386,
++          "source": "web"
++        },
++        "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++        "entry": "message"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "since": 1794207819386
++        }
++      }
++    ],
++    "seq": 10,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "request_update",
++        "value": {
++          "messageId": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++          "revision": 0,
++          "state": "open",
++          "titleMessages": 1
++        },
++        "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095"
++      }
++    ],
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "entry_add",
++        "afterId": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++        "value": {
++          "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "role": "assistant",
++          "content": "",
++          "timestamp": 1794207819446,
++          "triggeredByMessageId": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++          "agentId": "552e92e1-aabd-4e10-9924-a5cdb090d22f",
++          "isStreaming": true,
++          "source": "web",
++          "jobStatus": "running"
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++        "entry": "message"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "live": true,
++          "since": 1794207819386
++        }
++      }
++    ],
++    "seq": 11,
++    "repliedMessages": [
++      {
++        "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++        "role": "user",
++        "content": "只处理本次上传的合成 CSV：计算数据行数、value 列总和、每个 group 的行数。可以使用你自带的文件处理能力。不要访问其他项目，不要调用已登记的外部 MCP 文件桥，不要修改任何文件或部署。请返回计算结果。",
++        "timestamp": 1794207819386,
++        "source": "web"
++      }
++    ],
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "narration_update",
++        "value": {
++          "live": true,
++          "since": 1794207819451,
++          "working": true
++        }
++      }
++    ],
++    "seq": 12,
++    "shape": "records"
++  },
++  {
++    "data": [
++      {
++        "fields": {
++          "narration": {
++            "line": "正在使用我的电脑",
++            "lineKey": "narration.shell.command"
++          }
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++        "op": "message_update"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "line": "正在使用我的电脑",
++          "lineKey": "narration.shell.command",
++          "live": true,
++          "messageId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "since": 1794207823300,
++          "visible": true,
++          "working": true
++        }
++      }
++    ],
++    "seq": 13,
++    "shape": "records",
++    "type": "patches"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 14,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "message_update",
++        "fields": {
++          "narration": {
++            "line": "正在查找您的文件。"
++          }
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "line": "正在查找您的文件。",
++          "live": true,
++          "messageId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "since": 1794207824919,
++          "visible": true,
++          "working": true
++        }
++      }
++    ],
++    "seq": 15,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 16,
++    "shape": "records"
++  },
++  {
++    "data": [
++      {
++        "fields": {
++          "narration": {
++            "line": "正在使用我的电脑",
++            "lineKey": "narration.shell.command"
++          }
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++        "op": "message_update"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "line": "正在使用我的电脑",
++          "lineKey": "narration.shell.command",
++          "live": true,
++          "messageId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "since": 1794207840162,
++          "visible": true,
++          "working": true
++        }
++      }
++    ],
++    "seq": 17,
++    "shape": "records",
++    "type": "patches"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 18,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "message_update",
++        "fields": {
++          "narration": {
++            "line": "正在查找您的文件。"
++          }
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "line": "正在查找您的文件。",
++          "live": true,
++          "messageId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "since": 1794207841348,
++          "visible": true,
++          "working": true
++        }
++      }
++    ],
++    "seq": 19,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 20,
++    "shape": "records"
++  },
++  {
++    "data": [
++      {
++        "fields": {
++          "narration": {
++            "line": "正在使用我的电脑",
++            "lineKey": "narration.shell.command"
++          }
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++        "op": "message_update"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "line": "正在使用我的电脑",
++          "lineKey": "narration.shell.command",
++          "live": true,
++          "messageId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "since": 1794207861804,
++          "visible": true,
++          "working": true
++        }
++      }
++    ],
++    "seq": 21,
++    "shape": "records",
++    "type": "patches"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 22,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 23,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "message_update",
++        "fields": {
++          "narration": {
++            "line": "正在查看项目日志。"
++          }
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "line": "正在查看项目日志。",
++          "live": true,
++          "messageId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "since": 1794207862697,
++          "visible": true,
++          "working": true
++        }
++      }
++    ],
++    "seq": 24,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "message_update",
++        "fields": {
++          "content": ""
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8"
++      }
++    ],
++    "seq": 25,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 26,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "request_update",
++        "value": {
++          "followsUp": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "lineage": [
++            "10eeb335-e36e-49da-91b8-b572cd60d0c5"
++          ],
++          "messageId": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++          "revision": 1,
++          "state": "open",
++          "titleMessages": 1
++        },
++        "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095"
++      }
++    ],
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "request_update",
++        "value": {
++          "acknowledgedAt": "2026-11-09T07:04:26.094Z",
++          "awaitsPerson": true,
++          "followsUp": "10eeb335-e36e-49da-91b8-b572cd60d0c5",
++          "lineage": [
++            "10eeb335-e36e-49da-91b8-b572cd60d0c5"
++          ],
++          "messageId": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++          "revision": 3,
++          "state": "open",
++          "titleMessages": 1
++        },
++        "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095"
++      }
++    ],
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "narration_update",
++        "value": {
++          "line": "正在查看项目日志。",
++          "live": true,
++          "messageId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++          "since": 1794207866126,
++          "visible": true
++        }
++      }
++    ],
++    "seq": 27,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "entry_add",
++        "afterId": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8",
++        "value": {
++          "id": "deda6ae6-701a-4422-977f-ffefd8ea6dec",
++          "role": "assistant",
++          "content": "这条消息里没有收到 CSV 附件，我这边找不到任何上传的文件。我没有访问其他项目或文件桥，也没有修改任何文件。可以重新上传一次吗？收到后我马上计算。",
++          "timestamp": 1794207866128,
++          "triggeredByMessageId": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++          "answersMessageIds": [
++            "eaad53b5-2ac4-4680-a4e3-76027f1fa095"
++          ],
++          "agentId": "552e92e1-aabd-4e10-9924-a5cdb090d22f",
++          "isStreaming": false,
++          "source": "send_bubble",
++          "presentation": {
++            "kind": "text"
++          },
++          "inputNeeded": true
++        },
++        "id": "deda6ae6-701a-4422-977f-ffefd8ea6dec",
++        "entry": "message"
++      },
++      {
++        "op": "message_update",
++        "fields": {
++          "agentId": null,
++          "isStreaming": false,
++          "jobStatus": "completed"
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8"
++      },
++      {
++        "op": "message_update",
++        "fields": {
++          "narration": null
++        },
++        "id": "c0850e17-71ca-46b7-b3ec-fe65cdf5d8a8"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "since": 1794207866128,
++          "visible": true
++        }
++      }
++    ],
++    "seq": 28,
++    "repliedMessages": [
++      {
++        "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++        "role": "user",
++        "content": "只处理本次上传的合成 CSV：计算数据行数、value 列总和、每个 group 的行数。可以使用你自带的文件处理能力。不要访问其他项目，不要调用已登记的外部 MCP 文件桥，不要修改任何文件或部署。请返回计算结果。",
++        "timestamp": 1794207819386,
++        "source": "web"
++      }
++    ],
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [],
++    "seq": 29,
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "entry_add",
++        "afterId": "deda6ae6-701a-4422-977f-ffefd8ea6dec",
++        "value": {
++          "id": "15416531-ae33-44e8-a98f-caab93145faf",
++          "role": "assistant",
++          "content": "",
++          "timestamp": 1794207866518,
++          "triggeredByMessageId": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++          "agentId": "552e92e1-aabd-4e10-9924-a5cdb090d22f",
++          "isStreaming": true,
++          "source": "web",
++          "jobStatus": "running"
++        },
++        "id": "15416531-ae33-44e8-a98f-caab93145faf",
++        "entry": "message"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "live": true,
++          "since": 1794207866128,
++          "visible": true
++        }
++      }
++    ],
++    "seq": 30,
++    "repliedMessages": [
++      {
++        "id": "eaad53b5-2ac4-4680-a4e3-76027f1fa095",
++        "role": "user",
++        "content": "只处理本次上传的合成 CSV：计算数据行数、value 列总和、每个 group 的行数。可以使用你自带的文件处理能力。不要访问其他项目，不要调用已登记的外部 MCP 文件桥，不要修改任何文件或部署。请返回计算结果。",
++        "timestamp": 1794207819386,
++        "source": "web"
++      }
++    ],
++    "shape": "records"
++  },
++  {
++    "type": "patches",
++    "data": [
++      {
++        "op": "message_update",
++        "fields": {
++          "agentId": null,
++          "isStreaming": false,
++          "jobStatus": "completed",
++          "source": "web"
++        },
++        "id": "15416531-ae33-44e8-a98f-caab93145faf"
++      },
++      {
++        "op": "narration_update",
++        "value": {
++          "since": 1794207866128,
++          "visible": true
++        }
++      }
++    ],
++    "seq": 31,
++    "shape": "records"
++  }
++]
 diff --git a/tool_contract.go b/tool_contract.go
 new file mode 100644
 --- /dev/null
@@ -606,5 +1256,666 @@ new file mode 100644
 +		if got := parseToolChoice(json.RawMessage(tc.raw)); got != tc.want {
 +			t.Errorf("parseToolChoice(%s)=%q; want=%q", tc.raw, got, tc.want)
 +		}
++	}
++}
+diff --git a/tools.go b/tools.go
+--- a/tools.go
++++ b/tools.go
+@@ -145,0 +146,3 @@
++		if m.Type == "required" || m.Type == "auto" || m.Type == "none" {
++			return m.Type
++		}
+@@ -151,2 +154,2 @@
+-func toolPrompt(tools []toolSpec, choice string) string {
+-	if len(tools) == 0 || choice == "none" {
++func toolPrompt(tools []toolSpec, choice string, named bool) string {
++	if len(tools) == 0 || choice == "none" && !named {
+@@ -177,3 +180,5 @@
+-	switch choice {
+-	case "auto", "":
+-	case "required":
++	switch {
++	case named:
++		b.WriteString("- This turn you MUST call the tool \"" + choice + "\".\n")
++	case choice == "auto" || choice == "":
++	case choice == "required":
+@@ -208,0 +214,10 @@
++}
++
++func isNamedToolChoice(raw json.RawMessage) bool {
++	var selection struct {
++		Name     string `json:"name"`
++		Function struct {
++			Name string `json:"name"`
++		} `json:"function"`
++	}
++	return json.Unmarshal(raw, &selection) == nil && (selection.Name != "" || selection.Function.Name != "")
+diff --git a/turn_status.go b/turn_status.go
+new file mode 100644
+--- /dev/null
++++ b/turn_status.go
+@@ -0,0 +1,316 @@
++package gateway
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/url"
++	"strings"
++	"sync"
++	"unicode"
++)
++
++// turnStatus is out-of-band UI metadata, never assistant content or a tool receipt.
++type turnStatus struct {
++	Type           string `json:"type"`
++	Status         string `json:"status"`
++	ConversationID string `json:"conversation_id"`
++	RequestID      string `json:"request_id"`
++	MessageID      string `json:"message_id,omitempty"`
++	Line           string `json:"line"`
++	LineKey        string `json:"line_key,omitempty"`
++	Sequence       int64  `json:"sequence"`
++	Reason         string `json:"reason,omitempty"`
++}
++
++type statusNarration struct {
++	MessageID string `json:"messageId"`
++	Line      string `json:"line"`
++	LineKey   string `json:"lineKey"`
++	Live      bool   `json:"live"`
++}
++
++type turnStatusTracker struct {
++	mu                       sync.Mutex
++	cid, expected, requestID string
++	messages                 map[string]harkMessage
++	revision                 int64
++	upstreamSeq, sequence    int64
++	waiting                  bool
++	hasSync                  bool
++	settled                  chan struct{}
++	last                     turnStatus
++	notify                   func(turnStatus)
++}
++
++func newTurnStatusTracker(cid, expected, requestID string, notify func(turnStatus)) *turnStatusTracker {
++	return &turnStatusTracker{cid: cid, expected: expected, requestID: requestID, messages: map[string]harkMessage{}, revision: -1, settled: make(chan struct{}), notify: notify}
++}
++
++func (s *turnStatusTracker) waitForPerson(needed bool) {
++	if needed && !s.waiting {
++		s.waiting = true
++		close(s.settled)
++	}
++}
++
++// Only user-visible narration is decoded. Private thought/reasoning and tool
++// arguments/results are intentionally absent from this metadata path.
++func statusLine(s string) string {
++	s = strings.Map(func(r rune) rune {
++		if unicode.IsControl(r) {
++			return -1
++		}
++		return r
++	}, s)
++	runes := []rune(s)
++	if len(runes) > 2048 {
++		runes = runes[:2048]
++	}
++	return strings.TrimSpace(string(runes))
++}
++
++func (s *turnStatusTracker) current() turnStatus {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return s.last
++}
++
++func (s *turnStatusTracker) syncStopped() {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.hasSync = false
++}
++
++func (s *turnStatusTracker) publish(m harkMessage) {
++	state := "processing"
++	if s.waiting {
++		state = "waiting_for_user"
++	}
++	line, key := "", ""
++	if state == "processing" && m.Narration != nil {
++		line, key = statusLine(m.Narration.Line), statusLine(m.Narration.LineKey)
++	}
++	if state == "processing" && m.Streaming != nil && !*m.Streaming {
++		return
++	}
++	if state == "processing" && m.JobStatus != "running" && (m.Streaming == nil || !*m.Streaming) && line == "" {
++		return
++	}
++	next := turnStatus{Type: "hark.status", Status: state, ConversationID: s.cid, RequestID: s.requestID, MessageID: m.ID, Line: line, LineKey: key}
++	if s.last.Status == next.Status && s.last.MessageID == next.MessageID && s.last.Line == next.Line && s.last.LineKey == next.LineKey {
++		return
++	}
++	s.sequence++
++	next.Sequence = s.sequence
++	s.last = next
++	if s.notify != nil {
++		s.notify(next)
++	}
++}
++
++func (s *turnStatusTracker) history(messages []harkMessage) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	for _, m := range messages {
++		if !boundToTurn(m, s.expected, s.requestID) {
++			continue
++		}
++		// The sync channel is authoritative for live text. History is a fallback,
++		// but inputNeeded remains a durable waiting-for-person signal.
++		s.waitForPerson(m.InputNeeded)
++		if _, ok := s.messages[m.ID]; !ok || !s.hasSync {
++			s.messages[m.ID] = m
++			s.publish(m)
++		} else if s.waiting {
++			s.publish(s.messages[m.ID])
++		}
++	}
++}
++
++func (s *turnStatusTracker) observe(payload []byte) {
++	var frame struct {
++		Type string          `json:"type"`
++		Seq  int64           `json:"seq"`
++		Data json.RawMessage `json:"data"`
++	}
++	if json.Unmarshal(payload, &frame) != nil {
++		return
++	}
++	if frame.Type != "snapshot" && frame.Type != "patches" {
++		return
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if frame.Seq > 0 && frame.Seq <= s.upstreamSeq {
++		return
++	}
++	if frame.Seq > 0 {
++		s.upstreamSeq = frame.Seq
++	}
++	if frame.Type == "snapshot" {
++		var snapshot struct {
++			Messages  map[string]harkMessage     `json:"messages"`
++			Requests  map[string]json.RawMessage `json:"requests"`
++			Narration *statusNarration           `json:"narration"`
++		}
++		if json.Unmarshal(frame.Data, &snapshot) != nil {
++			return
++		}
++		s.hasSync = true
++		for id, m := range snapshot.Messages {
++			if m.ID == "" {
++				m.ID = id
++			}
++			if boundToTurn(m, s.expected, s.requestID) {
++				s.messages[id] = m
++				s.waitForPerson(m.InputNeeded)
++			}
++		}
++		if raw := snapshot.Requests[s.requestID]; raw != nil {
++			s.request(raw)
++		}
++		for _, m := range s.messages {
++			s.publish(m)
++		}
++		if n := snapshot.Narration; n != nil {
++			if m, ok := s.messages[n.MessageID]; ok {
++				m.Narration = n
++				s.messages[m.ID] = m
++				s.publish(m)
++			}
++		}
++		return
++	}
++	if frame.Type != "patches" {
++		return
++	}
++	var patches []struct {
++		Op     string          `json:"op"`
++		ID     string          `json:"id"`
++		Value  json.RawMessage `json:"value"`
++		Fields json.RawMessage `json:"fields"`
++	}
++	if json.Unmarshal(frame.Data, &patches) != nil {
++		return
++	}
++	s.hasSync = true
++	for _, p := range patches {
++		switch p.Op {
++		case "entry_add":
++			var m harkMessage
++			if json.Unmarshal(p.Value, &m) != nil {
++				continue
++			}
++			if m.ID == "" {
++				m.ID = p.ID
++			}
++			if !boundToTurn(m, s.expected, s.requestID) {
++				continue
++			}
++			s.messages[m.ID] = m
++			s.waitForPerson(m.InputNeeded)
++			s.publish(m)
++		case "message_update":
++			m, ok := s.messages[p.ID]
++			if !ok {
++				continue
++			}
++			if json.Unmarshal(p.Fields, &m) != nil || !boundToTurn(m, s.expected, s.requestID) {
++				continue
++			}
++			// Patch IDs cannot rebind metadata to another message.
++			m.ID = p.ID
++			s.messages[p.ID] = m
++			s.waitForPerson(m.InputNeeded)
++			s.publish(m)
++		case "narration_update":
++			var n statusNarration
++			if json.Unmarshal(p.Value, &n) != nil {
++				continue
++			}
++			m, ok := s.messages[n.MessageID]
++			if !ok {
++				continue
++			}
++			m.Narration = &n
++			s.messages[m.ID] = m
++			s.publish(m)
++		case "request_update":
++			if p.ID == s.requestID {
++				s.request(p.Value)
++			}
++		}
++	}
++}
++
++func (s *turnStatusTracker) request(raw json.RawMessage) {
++	var v struct {
++		MessageID    string `json:"messageId"`
++		Revision     int64  `json:"revision"`
++		AwaitsPerson bool   `json:"awaitsPerson"`
++	}
++	if json.Unmarshal(raw, &v) != nil || v.MessageID != s.requestID || v.Revision <= s.revision {
++		return
++	}
++	s.revision = v.Revision
++	// A new client turn creates a new tracker. Within this accepted request a
++	// late stub must not turn waiting-for-person back into working/success.
++	s.waitForPerson(v.AwaitsPerson)
++	if s.waiting {
++		s.publish(harkMessage{ID: s.last.MessageID})
++	}
++}
++
++// readStatusSSE handles split/multiline SSE, comments and bounded frames.
++func readStatusSSE(body io.Reader, apply func([]byte)) {
++	scanner := bufio.NewScanner(body)
++	scanner.Buffer(make([]byte, 4096), 1024*1024)
++	var data strings.Builder
++	flush := func() {
++		if data.Len() > 0 {
++			apply([]byte(strings.TrimSuffix(data.String(), "\n")))
++			data.Reset()
++		}
++	}
++	for scanner.Scan() {
++		line := strings.TrimSuffix(scanner.Text(), "\r")
++		if line == "" {
++			flush()
++			continue
++		}
++		if strings.HasPrefix(line, "data:") {
++			part := strings.TrimPrefix(line, "data:")
++			part = strings.TrimPrefix(part, " ")
++			if data.Len()+len(part) > 1024*1024 {
++				return
++			}
++			data.WriteString(part)
++			data.WriteByte('\n')
++		}
++	}
++	// An incomplete frame at EOF is not an observed event.
++}
++
++func (s *Server) watchTurnStatus(ctx context.Context, cookie, cid string, tracker *turnStatusTracker) {
++	defer tracker.syncStopped()
++	query := url.Values{"conversationId": {cid}, "v": {"2"}, "manager": {uuid()}, "mode": {"in_tab"}, "ids": {"1"}, "beat": {"5"}}
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.upstream+"/api/sync/conversation?"+query.Encode(), nil)
++	if err != nil {
++		return
++	}
++	req.Header.Set("Cookie", cookie)
++	req.Header.Set("Accept", "text/event-stream")
++	response, err := s.clientFor(cookie, 0, false).Do(req)
++	if err != nil {
++		return
++	}
++	defer response.Body.Close()
++	// Metadata failure is not a failed/retryable model submission.
++	if response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
++		return
++	}
++	readStatusSSE(response.Body, tracker.observe)
++}
+diff --git a/turn_status_stream_test.go b/turn_status_stream_test.go
+new file mode 100644
+--- /dev/null
++++ b/turn_status_stream_test.go
+@@ -0,0 +1,208 @@
++package gateway
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type statusTestRecorder struct {
++	*httptest.ResponseRecorder
++	gate chan struct{}
++	once sync.Once
++}
++
++func (w *statusTestRecorder) Write(b []byte) (int, error) {
++	if bytes.Contains(b, []byte("hark.status")) {
++		w.once.Do(func() { close(w.gate) })
++	}
++	return w.ResponseRecorder.Write(b)
++}
++
++func TestTurnStatusStreamingProtocols(t *testing.T) {
++	for _, protocol := range []string{"chat", "messages", "responses"} {
++		for _, kind := range []string{"ended", "waiting", "legacy", "required_error"} {
++			t.Run(protocol+"/"+kind, func(t *testing.T) {
++				opt := kind != "legacy"
++				gate := make(chan struct{})
++				var syncCalls atomic.Int32
++				var mu sync.Mutex
++				var userID, responseID string
++				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++					w.Header().Set("Content-Type", "application/json")
++					switch r.URL.Path {
++					case "/api/conversations":
++						json.NewEncoder(w).Encode(map[string]string{"conversationId": "status-fixture"})
++					case "/api/messages/send":
++						var p map[string]json.RawMessage
++						json.NewDecoder(r.Body).Decode(&p)
++						if _, leaked := p["hark_status"]; leaked {
++							t.Error("internal flag leaked to upstream")
++						}
++						mu.Lock()
++						json.Unmarshal(p["idempotencyKey"], &userID)
++						json.Unmarshal(p["responseMessageId"], &responseID)
++						u := userID
++						mu.Unlock()
++						json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "status-fixture", "messageId": u, "redirected": false})
++					case "/api/sync/conversation":
++						syncCalls.Add(1)
++						mu.Lock()
++						u, a := userID, responseID
++						mu.Unlock()
++						w.Header().Set("Content-Type", "text/event-stream")
++						data, _ := json.Marshal(map[string]any{"type": "snapshot", "shape": "records", "data": map[string]any{"messages": map[string]any{a: map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "running", "isStreaming": true, "narration": map[string]string{"line": "Reading fixture"}, "thought": "PRIVATE_THOUGHT"}}}})
++						fmt.Fprintf(w, "data: %s\n\n", data)
++						w.(http.Flusher).Flush()
++						<-r.Context().Done()
++					case "/api/messages/history":
++						if opt {
++							select {
++							case <-gate:
++							case <-r.Context().Done():
++								return
++							}
++						}
++						mu.Lock()
++						u, a := userID, responseID
++						mu.Unlock()
++						json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": "ORIGINAL_BODY", "inputNeeded": kind == "waiting"}}})
++					default:
++						http.Error(w, "fixture missing", 404)
++					}
++				}))
++				defer upstream.Close()
++				server, err := NewEmbedded(t.TempDir(), Options{Upstream: upstream.URL, PollInterval: time.Millisecond})
++				if err != nil {
++					t.Fatal(err)
++				}
++				body := map[string]any{"model": "hark", "stream": true, "hark_status": opt}
++				path := "/v1/chat/completions"
++				body["messages"] = []any{map[string]string{"role": "user", "content": "fixture"}}
++				if protocol == "messages" {
++					path = "/v1/messages"
++					body["max_tokens"] = 100
++				}
++				if protocol == "responses" {
++					path = "/v1/responses"
++					delete(body, "messages")
++					body["input"] = "fixture"
++				}
++				if kind == "required_error" {
++					body["tool_choice"] = "required"
++					body["tools"] = []any{map[string]any{"type": "function", "function": map[string]any{"name": "fixture_read", "parameters": map[string]string{"type": "object"}}}}
++					if protocol == "responses" {
++						body["tools"] = []any{map[string]any{"type": "function", "name": "fixture_read", "parameters": map[string]string{"type": "object"}}}
++					}
++					if protocol == "messages" {
++						body["tool_choice"] = map[string]string{"type": "any"}
++						body["tools"] = []any{map[string]any{"name": "fixture_read", "input_schema": map[string]string{"type": "object"}}}
++					}
++				}
++				raw, _ := json.Marshal(body)
++				req := httptest.NewRequest("POST", path, bytes.NewReader(raw))
++				req.Header.Set("Content-Type", "application/json")
++				ctx, cancel := context.WithTimeout(WithEmbeddedAccount(req.Context(), SourceAccount{ID: "status-account", Cookie: "fixture-cookie"}), 5*time.Second)
++				defer cancel()
++				req = req.WithContext(ctx)
++				writer := &statusTestRecorder{ResponseRecorder: httptest.NewRecorder(), gate: gate}
++				server.EmbeddedHandler().ServeHTTP(writer, req)
++				text := writer.Body.String()
++				if kind == "required_error" {
++					if writer.Code != 200 || !strings.Contains(text, "tool_call_missing") || strings.Contains(text, "ORIGINAL_BODY") || !strings.Contains(text, `"reason":"error"`) {
++						t.Fatalf("required-tool status masked execution failure: %d %s", writer.Code, text)
++					}
++					return
++				}
++				if writer.Code != 200 || !strings.Contains(text, "ORIGINAL_BODY") {
++					t.Fatalf("body changed: %d %s", writer.Code, text)
++				}
++				if strings.Contains(text, "PRIVATE_THOUGHT") {
++					t.Fatal("private reasoning leaked")
++				}
++				if !opt {
++					if syncCalls.Load() != 0 || strings.Contains(text, "hark.status") {
++						t.Fatal("legacy client changed")
++					}
++					return
++				}
++				if syncCalls.Load() != 1 || !strings.Contains(text, `"line":"Reading fixture"`) {
++					t.Fatalf("no live independent status: %s", text)
++				}
++				want := `"status":"ended"`
++				if kind == "waiting" {
++					want = `"status":"waiting_for_user"`
++					if strings.Contains(text, `"status":"ended"`) {
++						t.Fatal("waiting overwritten")
++					}
++				}
++				if !strings.Contains(text, want) {
++					t.Fatalf("missing %s: %s", want, text)
++				}
++			})
++		}
++	}
++}
++
++func TestTurnStatusSSEFraming(t *testing.T) {
++	var got []string
++	readStatusSSE(strings.NewReader(":ping\r\n\r\ndata: {\r\ndata: \"type\":\"patches\",\"data\":[]\r\ndata: }\r\n\r\ndata: incomplete"), func(b []byte) {
++		if !json.Valid(b) {
++			t.Fatal("invalid multiline frame")
++		}
++		got = append(got, string(b))
++	})
++	if len(got) != 1 {
++		t.Fatal("partial or heartbeat became status")
++	}
++}
++
++func TestTurnStatusLateAwaitingPersonBeforeFinalReply(t *testing.T) {
++	var mu sync.Mutex
++	var user, assistant string
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/api/messages/send":
++			var p map[string]json.RawMessage
++			json.NewDecoder(r.Body).Decode(&p)
++			mu.Lock()
++			json.Unmarshal(p["idempotencyKey"], &user)
++			json.Unmarshal(p["responseMessageId"], &assistant)
++			u := user
++			mu.Unlock()
++			json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "c", "messageId": u, "redirected": false})
++		case "/api/messages/history":
++			mu.Lock()
++			u, a := user, assistant
++			mu.Unlock()
++			json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "isStreaming": false, "jobStatus": "completed", "content": "UNCHANGED"}}})
++		case "/api/sync/conversation":
++			time.Sleep(20 * time.Millisecond)
++			mu.Lock()
++			u, a := user, assistant
++			mu.Unlock()
++			w.Header().Set("Content-Type", "text/event-stream")
++			data, _ := json.Marshal(map[string]any{"type": "snapshot", "data": map[string]any{"messages": map[string]any{a: map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "isStreaming": false, "jobStatus": "completed"}}, "requests": map[string]any{u: map[string]any{"messageId": u, "revision": 3, "awaitsPerson": true, "state": "open"}}}})
++			fmt.Fprintf(w, "data: %s\n\n", data)
++		}
++	}))
++	defer upstream.Close()
++	server, err := NewEmbedded(t.TempDir(), Options{Upstream: upstream.URL, PollInterval: time.Millisecond})
++	if err != nil {
++		t.Fatal(err)
++	}
++	var got []turnStatus
++	reply, err := server.sendProjectPayload(context.Background(), "fixture", "c", map[string]any{"conversationId": "c", "message": "fixture"}, time.Millisecond, turnHooks{status: func(s turnStatus) { got = append(got, s) }})
++	if err != nil || reply.Text != "UNCHANGED" || len(got) == 0 || got[len(got)-1].Status != "waiting_for_user" {
++		t.Fatalf("late request state lost: %s %+v %v", reply.Text, got, err)
++	}
++}
+diff --git a/turn_status_test.go b/turn_status_test.go
+new file mode 100644
+--- /dev/null
++++ b/turn_status_test.go
+@@ -0,0 +1,90 @@
++package gateway
++
++import (
++	"encoding/json"
++	"os"
++	"testing"
++)
++
++func TestTurnStatusLiveTrace(t *testing.T) {
++	b, err := os.ReadFile("testdata/turn_status_trace.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var frames []json.RawMessage
++	if err = json.Unmarshal(b, &frames); err != nil {
++		t.Fatal(err)
++	}
++	var got []turnStatus
++	tracker := newTurnStatusTracker("fixture-project", "unused-response-id", "eaad53b5-2ac4-4680-a4e3-76027f1fa095", func(v turnStatus) { got = append(got, v) })
++	for _, frame := range frames {
++		tracker.observe(frame)
++	}
++	lines := map[string]bool{}
++	for i, s := range got {
++		if s.Sequence != int64(i+1) {
++			t.Fatal("non-monotonic sequence")
++		}
++		lines[s.Line] = true
++		if s.RequestID != tracker.requestID {
++			t.Fatal("request mismatch")
++		}
++	}
++	for _, line := range []string{"正在使用我的电脑", "正在查找您的文件。", "正在查看项目日志。"} {
++		if !lines[line] {
++			t.Fatalf("missing real stage %q: %+v", line, got)
++		}
++	}
++	if len(got) == 0 || got[len(got)-1].Status != "waiting_for_user" {
++		t.Fatalf("job completion disguised missing attachment as success: %+v", got)
++	}
++	if tracker.current().Line != "" {
++		t.Fatal("waiting state retained stale working narration")
++	}
++}
++
++func TestTurnStatusIgnoresOtherTurnsAndReplays(t *testing.T) {
++	var got []turnStatus
++	s := newTurnStatusTracker("c", "a", "u", func(v turnStatus) { got = append(got, v) })
++	s.observe([]byte(`{"type":"patches","seq":1,"data":[{"op":"entry_add","id":"old","value":{"id":"old","role":"assistant","triggeredByMessageId":"other","jobStatus":"running","isStreaming":true}},{"op":"narration_update","value":{"messageId":"old","line":"wrong","live":true}}]}`))
++	if len(got) != 0 {
++		t.Fatal("other turn leaked")
++	}
++	frame := []byte(`{"type":"patches","seq":2,"data":[{"op":"entry_add","id":"a","value":{"id":"a","role":"assistant","triggeredByMessageId":"u","jobStatus":"running","isStreaming":true}},{"op":"message_update","id":"a","fields":{"narration":{"line":"Reading fixture","lineKey":"fixture.read"}}}]}`)
++	s.observe(frame)
++	n := len(got)
++	s.observe(frame)
++	if len(got) != n || n == 0 {
++		t.Fatal("replayed frame changed status")
++	}
++	s.observe([]byte(`{"type":"patches","data":[{"op":"request_update","id":"u","value":{"messageId":"u","revision":3,"awaitsPerson":true,"state":"open"}}]}`))
++	s.observe([]byte(`{"type":"patches","data":[{"op":"request_update","id":"u","value":{"messageId":"u","revision":2,"awaitsPerson":false,"state":"open"}}]}`))
++	s.observe([]byte(`{"type":"patches","seq":3,"data":[{"op":"message_update","id":"a","fields":{"narration":{"line":"late"},"isStreaming":true}}]}`))
++	if s.current().Status != "waiting_for_user" {
++		t.Fatal("late work rolled waiting backward")
++	}
++}
++
++func TestTurnStatusOptInParsers(t *testing.T) {
++	var v chatRequest
++	if err := parseEnvelope(map[string]json.RawMessage{"model": json.RawMessage(`"hark"`), "hark_status": json.RawMessage(`true`)}, &v); err != nil || !v.StatusEvents {
++		t.Fatalf("flag lost: %+v %v", v, err)
++	}
++	if _, ok := extraFields(map[string]json.RawMessage{"hark_status": json.RawMessage(`true`)})["hark_status"]; ok {
++		t.Fatal("internal status switch forwarded upstream")
++	}
++	if err := parseEnvelope(map[string]json.RawMessage{"model": json.RawMessage(`"hark"`), "hark_status": json.RawMessage(`"true"`)}, &v); err == nil {
++		t.Fatal("non-boolean flag accepted")
++	}
++}
++
++func TestTurnStatusHistoryResumesAfterSyncDisconnect(t *testing.T) {
++	s := newTurnStatusTracker("c", "a", "u", nil)
++	s.observe([]byte(`{"type":"patches","seq":1,"data":[{"op":"entry_add","id":"a","value":{"id":"a","role":"assistant","triggeredByMessageId":"u","jobStatus":"running","isStreaming":true,"narration":{"line":"first"}}}]}`))
++	s.syncStopped()
++	streaming := true
++	s.history([]harkMessage{{ID: "a", Role: "assistant", TriggeredBy: "u", JobStatus: "running", Streaming: &streaming, Narration: &statusNarration{Line: "after disconnect"}}})
++	if s.current().Line != "after disconnect" {
++		t.Fatal("sync disconnect froze fallback status")
 +	}
 +}

@@ -334,7 +334,7 @@ func (s *Server) normalizeMessages(b []byte) (chatRequest, string, error) {
 	}
 	// 任何模型名都当作 hark；tools / tool_choice 是 Anthropic 写法，单独解析。
 	env := map[string]json.RawMessage{"model": json.RawMessage(`"hark"`)}
-	for _, k := range []string{"stream", "session_id", "session_end", "hark_bridge"} {
+	for _, k := range []string{"stream", "session_id", "session_end", "hark_bridge", "hark_status"} {
 		if raw, ok := object[k]; ok {
 			env[k] = raw
 		}

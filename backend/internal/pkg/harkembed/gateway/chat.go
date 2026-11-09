@@ -144,7 +144,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}
 
 	payload := s.nativeProjectPayload(v, s.zoneFor(account), p.ConversationID, text, attachments, account.UserID)
-	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
+	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
 		s.projectMu.Lock()
 		p.Sent, p.Systems = plan.sent, plan.systems
 		p.Turns++
@@ -369,6 +369,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	started := false
 	emitted := ""
 	lastWrite := time.Now()
+	var latestStatus turnStatus
 	flusher, _ := w.(http.Flusher)
 	emit := func(event string, payload any) {
 		b, _ := json.Marshal(payload)
@@ -424,6 +425,17 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			}
 		},
 	}
+	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
+		hooks.status = func(status turnStatus) {
+			mu.Lock()
+			defer mu.Unlock()
+			if !started || r.Context().Err() != nil {
+				return
+			}
+			latestStatus = status
+			emit("hark.status", status)
+		}
+	}
 	err := s.runTurn(ctx, r, v, res, hooks)
 	mu.Lock()
 	defer mu.Unlock()
@@ -437,6 +449,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			return
 		}
 		status, code, message := turnError(ctx, err)
+		if latestStatus.Type != "" && r.Context().Err() == nil {
+			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
+			latestStatus.Sequence++
+			emit("hark.status", latestStatus)
+		}
 		_ = status
 		rec.update(func(l *RequestLog) { l.Code = code })
 		s.logChatFailure(code)
@@ -462,6 +479,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 		if rest != "" {
 			format.delta(emit, rest)
 		}
+	}
+	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" {
+		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
+		latestStatus.Sequence++
+		emit("hark.status", latestStatus)
 	}
 	format.finish(emit, final, res.ToolCalls)
 	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)

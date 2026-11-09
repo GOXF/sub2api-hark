@@ -326,6 +326,8 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	var terminal openAIRawStreamTerminalState
 	var acceptedFailure error
 	var acceptedFailureStatus int
+	var statusFrame []string
+	statusAccepted := false
 
 	writeLine := func(line string) {
 		if clientDisconnected {
@@ -361,6 +363,27 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		// Opt-in Hark UI metadata is neither model output nor billable content.
+		// Do not hold it behind silent-refusal buffering or count it as TTFT.
+		if account.IsHark() && (strings.TrimSpace(line) == "event: hark.status" || len(statusFrame) > 0) {
+			statusFrame = append(statusFrame, line)
+			if len(statusFrame) > 16 {
+				return nil, fmt.Errorf("invalid processing-status frame")
+			}
+			if line == "" {
+				statusAccepted = true
+				if !clientDisconnected {
+					writeStreamHeaders()
+					_, writeErr := c.Writer.WriteString(strings.Join(statusFrame, "\n") + "\n")
+					clientDisconnected = writeErr != nil
+					if !clientDisconnected {
+						c.Writer.Flush()
+					}
+				}
+				statusFrame = nil
+			}
+			continue
+		}
 		refusalDetector.ObserveSSELine(line)
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
@@ -447,7 +470,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			zap.Bool("saw_sse_data", terminal.sawDataLine),
 			zap.Bool("client_output_started", clientOutputStarted),
 		)
-		if !clientOutputStarted {
+		if !clientOutputStarted && !statusAccepted {
 			// 响应头尚未提交：可以透明换号重试，客户端不会看到半截流。
 			return nil, newOpenAIRawStreamTruncatedFailoverError(c, account, requestID, cause)
 		}
@@ -459,6 +482,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 
 	if scanErr == nil && !clientDisconnected && !clientOutputStarted {
 		if acceptedFailure == nil && refusalDetector.IsSilentRefusal() {
+			if statusAccepted {
+				return resultWithUsage(), newOpenAIUpstreamStreamReadError(fmt.Errorf("accepted turn ended without assistant output"))
+			}
 			return nil, newOpenAISilentRefusalFailoverError(c, account, requestID)
 		}
 		if len(pendingLines) > 0 {

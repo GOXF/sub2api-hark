@@ -60,7 +60,8 @@ type chatRequest struct {
 	SessionEnd bool          `json:"session_end,omitempty"`
 	// Bridge asks for an account whose local file bridge is on (hark_bridge
 	// in the body or X-Hark-Bridge: true). It only affects new sessions.
-	Bridge bool `json:"hark_bridge,omitempty"`
+	Bridge       bool `json:"hark_bridge,omitempty"`
+	StatusEvents bool `json:"hark_status,omitempty"`
 	// Tools / ToolChoice：客户端声明的工具（见 tools.go 的工具调用模拟）。
 	Tools      []toolSpec `json:"-"`
 	ToolChoice string     `json:"-"`
@@ -296,6 +297,11 @@ func parseEnvelope(object map[string]json.RawMessage, v *chatRequest) error {
 			return inputError("invalid_bridge", "hark_bridge 必须是布尔值")
 		}
 	}
+	if raw, ok := object["hark_status"]; ok {
+		if json.Unmarshal(raw, &v.StatusEvents) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return inputError("invalid_status_events", "hark_status must be boolean")
+		}
+	}
 	tools, err := parseTools(object["tools"])
 	if err != nil {
 		return err
@@ -329,7 +335,7 @@ func extraFields(object map[string]json.RawMessage) map[string]json.RawMessage {
 	out := map[string]json.RawMessage{}
 	for name, value := range object {
 		switch name {
-		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "input", "instructions", "user":
+		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "hark_status", "input", "instructions", "user":
 		default:
 			out[name] = value
 		}
