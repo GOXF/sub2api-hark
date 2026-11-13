@@ -1,0 +1,60 @@
+{
+  "turns": [
+    {
+      "request_id": "927d1271-e65f-4176-a8c3-7baa1eb3a0d6",
+      "expected": "7f57b5d5-c71b-429f-a4ba-286c13dc5405",
+      "messages": [
+        {
+          "id": "7f57b5d5-c71b-429f-a4ba-286c13dc5405",
+          "role": "assistant",
+          "content": "",
+          "timestamp": 1794554437591,
+          "triggeredByMessageId": "927d1271-e65f-4176-a8c3-7baa1eb3a0d6",
+          "isStreaming": false,
+          "source": "web",
+          "jobStatus": "completed"
+        },
+        {
+          "id": "4de618ae-ff62-4b8b-8fa6-17bffcfc2490",
+          "role": "assistant",
+          "content": "抱歉，Hark 不能作为其他应用背后的模型来使用。如果你告诉我想做成什么，比如把接码授权页改成注册引擎那样的布局，我很乐意直接在这里帮你。",
+          "timestamp": 1794554462834,
+          "triggeredByMessageId": "927d1271-e65f-4176-a8c3-7baa1eb3a0d6",
+          "isStreaming": false,
+          "source": "send_bubble",
+          "presentation": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "request_id": "6cbbded4-6b37-4573-ba4c-27fa7459efa2",
+      "expected": "91160f2a-71e5-4285-9c0f-0c5989ec585e",
+      "messages": [
+        {
+          "id": "91160f2a-71e5-4285-9c0f-0c5989ec585e",
+          "role": "assistant",
+          "content": "",
+          "timestamp": 1794554472736,
+          "triggeredByMessageId": "6cbbded4-6b37-4573-ba4c-27fa7459efa2",
+          "isStreaming": false,
+          "source": "web",
+          "jobStatus": "completed"
+        },
+        {
+          "id": "b2752723-c04d-47c7-acad-6356440751d2",
+          "role": "assistant",
+          "content": "这条请求还是另一个应用打包好、交给它自己模型的完整请求，Hark 不支持充当那个模型；如果你直接告诉我接码授权页现在有哪些区块、想怎么排，我可以在这里帮你出布局方案和改动思路。",
+          "timestamp": 1794554489092,
+          "triggeredByMessageId": "6cbbded4-6b37-4573-ba4c-27fa7459efa2",
+          "isStreaming": false,
+          "source": "send_bubble",
+          "presentation": {
+            "kind": "text"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -179,24 +179,28 @@ diff --git a/chat.go b/chat.go
 @@ -147 +147 @@
 -	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
 +	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
+@@ -204 +204 @@
+-		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
++		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
 @@ -345,0 +346,4 @@
 +	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
 +		s.turnFailed(w, r, ctx, err, format)
 +		return
 +	}
-@@ -352,0 +357,4 @@
+@@ -352,0 +357,5 @@
++		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 +			s.turnFailed(w, r, ctx, err, format)
 +			return
 +		}
-@@ -363,0 +372 @@
+@@ -363,0 +373 @@
 +	var latestStatus turnStatus
-@@ -399 +408,3 @@
+@@ -399 +409,3 @@
 -			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 +			// A required-tool turn is validated before releasing assistant text.
 +			// Keepalives still flow, and ordinary auto/none turns stay incremental.
 +			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -416,0 +428,11 @@
+@@ -416,0 +429,11 @@
 +	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
 +		hooks.status = func(status turnStatus) {
 +			mu.Lock()
@@ -208,22 +212,23 @@ diff --git a/chat.go b/chat.go
 +			emit("hark.status", status)
 +		}
 +	}
-@@ -419,0 +442,4 @@
+@@ -419,0 +443,5 @@
++	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +	if err == nil {
 +		s.applyToolCalls(v, res)
 +		err = validateClientToolResult(v, res.ToolCalls)
 +	}
-@@ -425,0 +452,5 @@
-+		if latestStatus.Type != "" && r.Context().Err() == nil {
+@@ -425,0 +454,5 @@
++		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 +			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 +			latestStatus.Sequence++
 +			emit("hark.status", latestStatus)
 +		}
-@@ -437 +467,0 @@
+@@ -437 +469,0 @@
 -	s.applyToolCalls(v, res)
-@@ -451,0 +482,5 @@
+@@ -451,0 +484,5 @@
 +	}
-+	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" {
++	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 +		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
 +		latestStatus.Sequence++
 +		emit("hark.status", latestStatus)
@@ -250,6 +255,124 @@ diff --git a/chat_input.go b/chat_input.go
 @@ -329 +338 @@
 -		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "input", "instructions", "user":
 +		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "hark_status", "input", "instructions", "user":
+diff --git a/declined.go b/declined.go
+new file mode 100644
+--- /dev/null
++++ b/declined.go
+@@ -0,0 +1,30 @@
++package gateway
++
++import (
++	"strings"
++	"unicode/utf8"
++)
++
++// These are observed plain-text backend refusals, not native declined_notice
++// metadata. Match only an explicit self-refusal at the start of a short,
++// unquoted, finished text bubble. Do not
++// generalize "sorry", provider mentions or quoted refusal examples into errors.
++// Unknown wording intentionally remains ordinary text until evidenced.
++func recordedBackendRefusal(m harkMessage) bool {
++	if m.Source != "send_bubble" || m.Presentation.Kind != "text" || m.Streaming == nil || *m.Streaming {
++		return false
++	}
++	text := strings.TrimSpace(m.Content)
++	if utf8.RuneCountInString(text) > 512 || strings.ContainsAny(text, "\r\n`\"“”") {
++		return false
++	}
++	for _, prefix := range []string{
++		"抱歉，Hark 不能作为其他应用背后的模型来使用。",
++		"这条请求还是另一个应用打包好、交给它自己模型的完整请求，Hark 不支持充当那个模型；",
++	} {
++		if tail, ok := strings.CutPrefix(text, prefix); ok && (tail == "" || strings.HasPrefix(tail, "如果你")) {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/declined_outcome_test.go b/declined_outcome_test.go
+new file mode 100644
+--- /dev/null
++++ b/declined_outcome_test.go
+@@ -0,0 +1,78 @@
++package gateway
++
++import (
++	"encoding/json"
++	"os"
++	"strings"
++	"testing"
++)
++
++func TestDeclinedRecordedBackendRefusal(t *testing.T) {
++	b, err := os.ReadFile("testdata/backend_refusal_history.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var trace struct {
++		Turns []struct {
++			RequestID string        `json:"request_id"`
++			Expected  string        `json:"expected"`
++			Messages  []harkMessage `json:"messages"`
++		} `json:"turns"`
++	}
++	if err := json.Unmarshal(b, &trace); err != nil {
++		t.Fatal(err)
++	}
++	for _, turn := range trace.Turns {
++		t.Run(turn.RequestID, func(t *testing.T) {
++			reply, err := completedProjectReply(turn.Messages, turn.Expected, turn.RequestID)
++			if err != nil || reply.Outcome != "declined" || reply.Text != turn.Messages[1].Content {
++				t.Fatalf("raw backend refusal treated as success: outcome=%q body_preserved=%v err=%v", reply.Outcome, reply.Text == turn.Messages[1].Content, err)
++			}
++			// A quote, user text, another turn, summary, or unfinished bubble is
++			// not an authoritative self-refusal for this completed turn.
++			for _, variant := range []string{"quote", "user", "other_turn", "summary", "streaming", "negation", "with_work"} {
++				messages := append([]harkMessage(nil), turn.Messages...)
++				m := &messages[1]
++				switch variant {
++				case "quote":
++					m.Content = "> " + m.Content
++				case "user":
++					m.Role = "user"
++				case "other_turn":
++					m.TriggeredBy = "other"
++				case "summary":
++					m.Presentation.Kind = "summary"
++				case "streaming":
++					yes := true
++					m.Streaming = &yes
++				case "negation":
++					m.Content = "并不是这样：" + m.Content
++				case "with_work":
++					m.Content += "\n已执行修改。"
++				}
++				r, _ := completedProjectReply(messages, turn.Expected, turn.RequestID)
++				if r.Outcome == "declined" {
++					t.Fatalf("false refusal: %s", variant)
++				}
++			}
++			messages := append([]harkMessage(nil), turn.Messages...)
++			messages[1].Content = "普通回答：可以修改页面布局。"
++			r, err := completedProjectReply(messages, turn.Expected, turn.RequestID)
++			if err != nil || r.Outcome != "completed" || !strings.HasPrefix(r.Text, "普通回答") {
++				t.Fatal("ordinary body changed")
++			}
++		})
++	}
++}
++
++func TestDeclinedStatusIsTerminal(t *testing.T) {
++	var got []turnStatus
++	s := newTurnStatusTracker("c", "a", "u", func(v turnStatus) { got = append(got, v) })
++	s.finishDeclined()
++	s.finishDeclined()
++	yes := true
++	s.history([]harkMessage{{ID: "a", Role: "assistant", TriggeredBy: "u", JobStatus: "running", Streaming: &yes, InputNeeded: true}})
++	if len(got) != 1 || got[0].Status != "ended" || got[0].Reason != "upstream_declined" || got[0].RequestID != "u" || got[0].Sequence != 1 {
++		t.Fatalf("late event replaced terminal refusal: %+v", got)
++	}
++}
 diff --git a/direct_chat.go b/direct_chat.go
 --- a/direct_chat.go
 +++ b/direct_chat.go
@@ -260,11 +383,21 @@ diff --git a/direct_chat.go b/direct_chat.go
 +	Narration   *statusNarration `json:"narration"`
 +	InputNeeded bool             `json:"inputNeeded"`
 +	Attachments []harkFile       `json:"attachments"`
-@@ -428 +430,2 @@
+@@ -301,0 +304,9 @@
++			// Plain-text refusals can accompany completed jobs. Only classify an
++			// otherwise empty result with one evidenced, turn-bound text bubble.
++			if len(parts) == 1 && len(files) == 0 {
++				for _, m := range messages {
++					if boundToTurn(m, expected, requestID) && recordedBackendRefusal(m) {
++						return projectReply{Text: parts[0], Outcome: "declined"}, nil
++					}
++				}
++			}
+@@ -428 +439,2 @@
 -	poll func(partial string)
 +	poll   func(partial string)
 +	status func(turnStatus)
-@@ -452,0 +456,9 @@
+@@ -452,0 +465,9 @@
 +	var statusTracker *turnStatusTracker
 +	var statusDone chan struct{}
 +	if hooks.status != nil {
@@ -274,11 +407,11 @@ diff --git a/direct_chat.go b/direct_chat.go
 +		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
 +		defer func() { stopStatus(); <-statusDone }()
 +	}
-@@ -457,0 +470,3 @@
+@@ -457,0 +479,3 @@
 +		if statusTracker != nil {
 +			statusTracker.history(messages)
 +		}
-@@ -462,0 +478,13 @@
+@@ -462,0 +487,16 @@
 +			if statusTracker != nil {
 +				// A job can finish just before the request-level awaiting-person
 +				// patch arrives. Give the existing feed a bounded drain, not a
@@ -291,6 +424,9 @@ diff --git a/direct_chat.go b/direct_chat.go
 +				case <-ctx.Done():
 +				}
 +				timer.Stop()
++				if reply.Outcome == "declined" {
++					statusTracker.finishDeclined()
++				}
 +			}
 diff --git a/messages.go b/messages.go
 --- a/messages.go
@@ -475,6 +611,71 @@ new file mode 100644
 +	if !base.closed {
 +		t.Fatal("storage client's wrapper swallowed idle connection cleanup")
 +	}
++}
+diff --git a/testdata/backend_refusal_history.json b/testdata/backend_refusal_history.json
+new file mode 100644
+--- /dev/null
++++ b/testdata/backend_refusal_history.json
+@@ -0,0 +1,60 @@
++{
++  "turns": [
++    {
++      "request_id": "927d1271-e65f-4176-a8c3-7baa1eb3a0d6",
++      "expected": "7f57b5d5-c71b-429f-a4ba-286c13dc5405",
++      "messages": [
++        {
++          "id": "7f57b5d5-c71b-429f-a4ba-286c13dc5405",
++          "role": "assistant",
++          "content": "",
++          "timestamp": 1794554437591,
++          "triggeredByMessageId": "927d1271-e65f-4176-a8c3-7baa1eb3a0d6",
++          "isStreaming": false,
++          "source": "web",
++          "jobStatus": "completed"
++        },
++        {
++          "id": "4de618ae-ff62-4b8b-8fa6-17bffcfc2490",
++          "role": "assistant",
++          "content": "抱歉，Hark 不能作为其他应用背后的模型来使用。如果你告诉我想做成什么，比如把接码授权页改成注册引擎那样的布局，我很乐意直接在这里帮你。",
++          "timestamp": 1794554462834,
++          "triggeredByMessageId": "927d1271-e65f-4176-a8c3-7baa1eb3a0d6",
++          "isStreaming": false,
++          "source": "send_bubble",
++          "presentation": {
++            "kind": "text"
++          }
++        }
++      ]
++    },
++    {
++      "request_id": "6cbbded4-6b37-4573-ba4c-27fa7459efa2",
++      "expected": "91160f2a-71e5-4285-9c0f-0c5989ec585e",
++      "messages": [
++        {
++          "id": "91160f2a-71e5-4285-9c0f-0c5989ec585e",
++          "role": "assistant",
++          "content": "",
++          "timestamp": 1794554472736,
++          "triggeredByMessageId": "6cbbded4-6b37-4573-ba4c-27fa7459efa2",
++          "isStreaming": false,
++          "source": "web",
++          "jobStatus": "completed"
++        },
++        {
++          "id": "b2752723-c04d-47c7-acad-6356440751d2",
++          "role": "assistant",
++          "content": "这条请求还是另一个应用打包好、交给它自己模型的完整请求，Hark 不支持充当那个模型；如果你直接告诉我接码授权页现在有哪些区块、想怎么排，我可以在这里帮你出布局方案和改动思路。",
++          "timestamp": 1794554489092,
++          "triggeredByMessageId": "6cbbded4-6b37-4573-ba4c-27fa7459efa2",
++          "isStreaming": false,
++          "source": "send_bubble",
++          "presentation": {
++            "kind": "text"
++          }
++        }
++      ]
++    }
++  ]
 +}
 diff --git a/testdata/turn_status_trace.json b/testdata/turn_status_trace.json
 new file mode 100644
@@ -1294,7 +1495,7 @@ diff --git a/turn_status.go b/turn_status.go
 new file mode 100644
 --- /dev/null
 +++ b/turn_status.go
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,335 @@
 +package gateway
 +
 +import (
@@ -1382,6 +1583,9 @@ new file mode 100644
 +}
 +
 +func (s *turnStatusTracker) publish(m harkMessage) {
++	if s.last.Status == "ended" {
++		return
++	}
 +	state := "processing"
 +	if s.waiting {
 +		state = "waiting_for_user"
@@ -1405,6 +1609,22 @@ new file mode 100644
 +	s.last = next
 +	if s.notify != nil {
 +		s.notify(next)
++	}
++}
++
++// A completed refusal is terminal even after awaitsPerson. Synthesize identity
++// from the accepted turn when the optional live feed carried no narration.
++func (s *turnStatusTracker) finishDeclined() {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.last.Reason == "upstream_declined" {
++		return
++	}
++	s.sequence++
++	s.last = turnStatus{Type: "hark.status", Status: "ended", ConversationID: s.cid,
++		RequestID: s.requestID, MessageID: s.expected, Sequence: s.sequence, Reason: "upstream_declined"}
++	if s.notify != nil {
++		s.notify(s.last)
 +	}
 +}
 +
@@ -1615,7 +1835,7 @@ diff --git a/turn_status_stream_test.go b/turn_status_stream_test.go
 new file mode 100644
 --- /dev/null
 +++ b/turn_status_stream_test.go
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,248 @@
 +package gateway
 +
 +import (
@@ -1647,9 +1867,16 @@ new file mode 100644
 +
 +func TestTurnStatusStreamingProtocols(t *testing.T) {
 +	for _, protocol := range []string{"chat", "messages", "responses"} {
-+		for _, kind := range []string{"ended", "waiting", "legacy", "required_error"} {
++		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json"} {
 +			t.Run(protocol+"/"+kind, func(t *testing.T) {
-+				opt := kind != "legacy"
++				opt := !strings.Contains(kind, "legacy")
++				declined := strings.Contains(kind, "declined")
++				stream := !strings.HasSuffix(kind, "_json")
++				bodyText := "ORIGINAL_BODY"
++				if declined {
++					bodyText = "抱歉，Hark 不能作为其他应用背后的模型来使用。"
++				}
++				var sends atomic.Int32
 +				gate := make(chan struct{})
 +				var syncCalls atomic.Int32
 +				var mu sync.Mutex
@@ -1660,6 +1887,7 @@ new file mode 100644
 +					case "/api/conversations":
 +						json.NewEncoder(w).Encode(map[string]string{"conversationId": "status-fixture"})
 +					case "/api/messages/send":
++						sends.Add(1)
 +						var p map[string]json.RawMessage
 +						json.NewDecoder(r.Body).Decode(&p)
 +						if _, leaked := p["hark_status"]; leaked {
@@ -1673,6 +1901,10 @@ new file mode 100644
 +						json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "status-fixture", "messageId": u, "redirected": false})
 +					case "/api/sync/conversation":
 +						syncCalls.Add(1)
++						if strings.Contains(kind, "no_sync") {
++							http.Error(w, "optional feed unavailable", 503)
++							return
++						}
 +						mu.Lock()
 +						u, a := userID, responseID
 +						mu.Unlock()
@@ -1682,7 +1914,7 @@ new file mode 100644
 +						w.(http.Flusher).Flush()
 +						<-r.Context().Done()
 +					case "/api/messages/history":
-+						if opt {
++						if opt && stream && !strings.Contains(kind, "no_sync") {
 +							select {
 +							case <-gate:
 +							case <-r.Context().Done():
@@ -1692,7 +1924,11 @@ new file mode 100644
 +						mu.Lock()
 +						u, a := userID, responseID
 +						mu.Unlock()
-+						json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": "ORIGINAL_BODY", "inputNeeded": kind == "waiting"}}})
++						messages := []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": bodyText, "source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "inputNeeded": strings.Contains(kind, "waiting")}}
++						if strings.HasPrefix(kind, "native_") {
++							messages = []any{map[string]any{"id": u, "role": "user"}, map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false}, map[string]any{"id": "notice", "role": "assistant", "source": "declined_notice", "presentation": map[string]string{"kind": "declined"}, "isStreaming": false, "content": bodyText}}
++						}
++						json.NewEncoder(w).Encode(map[string]any{"messages": messages})
 +					default:
 +						http.Error(w, "fixture missing", 404)
 +					}
@@ -1702,7 +1938,7 @@ new file mode 100644
 +				if err != nil {
 +					t.Fatal(err)
 +				}
-+				body := map[string]any{"model": "hark", "stream": true, "hark_status": opt}
++				body := map[string]any{"model": "hark", "stream": stream, "hark_status": opt}
 +				path := "/v1/chat/completions"
 +				body["messages"] = []any{map[string]string{"role": "user", "content": "fixture"}}
 +				if protocol == "messages" {
@@ -1714,7 +1950,7 @@ new file mode 100644
 +					delete(body, "messages")
 +					body["input"] = "fixture"
 +				}
-+				if kind == "required_error" {
++				if kind == "required_error" || kind == "declined_required" {
 +					body["tool_choice"] = "required"
 +					body["tools"] = []any{map[string]any{"type": "function", "function": map[string]any{"name": "fixture_read", "parameters": map[string]string{"type": "object"}}}}
 +					if protocol == "responses" {
@@ -1734,13 +1970,37 @@ new file mode 100644
 +				writer := &statusTestRecorder{ResponseRecorder: httptest.NewRecorder(), gate: gate}
 +				server.EmbeddedHandler().ServeHTTP(writer, req)
 +				text := writer.Body.String()
++				if sends.Load() != 1 {
++					t.Fatalf("accepted request replayed: %d", sends.Load())
++				}
++				if !stream {
++					if writer.Code != 200 || writer.Header().Get("X-Hark-Upstream-Outcome") != "declined" || !strings.Contains(text, bodyText) || strings.Contains(text, "hark.status") || syncCalls.Load() != 0 {
++						t.Fatalf("nonstream body/outcome changed: %d %s", writer.Code, text)
++					}
++					return
++				}
++				if declined && writer.Result().Trailer.Get("X-Hark-Upstream-Outcome") != "declined" {
++					t.Fatal("declined outcome trailer missing")
++				}
++				if kind == "declined_required" {
++					if !strings.Contains(text, "tool_call_missing") || !strings.Contains(text, `"reason":"upstream_declined"`) || strings.Contains(text, bodyText) || strings.Contains(text, `"reason":"error"`) {
++						t.Fatalf("refusal masked tool contract: %s", text)
++					}
++					return
++				}
++				if declined && opt {
++					if !strings.Contains(text, bodyText) || !strings.Contains(text, `"status":"ended"`) || strings.Count(text, `"reason":"upstream_declined"`) != 1 || strings.Contains(text, `"reason":"stream_ended"`) {
++						t.Fatalf("refusal status lost or body replaced: %s", text)
++					}
++					return
++				}
 +				if kind == "required_error" {
 +					if writer.Code != 200 || !strings.Contains(text, "tool_call_missing") || strings.Contains(text, "ORIGINAL_BODY") || !strings.Contains(text, `"reason":"error"`) {
 +						t.Fatalf("required-tool status masked execution failure: %d %s", writer.Code, text)
 +					}
 +					return
 +				}
-+				if writer.Code != 200 || !strings.Contains(text, "ORIGINAL_BODY") {
++				if writer.Code != 200 || !strings.Contains(text, bodyText) {
 +					t.Fatalf("body changed: %d %s", writer.Code, text)
 +				}
 +				if strings.Contains(text, "PRIVATE_THOUGHT") {
