@@ -106,13 +106,18 @@ func TestRequiredClientToolsContract(t *testing.T) {
 					} else {
 						request["tool_choice"] = tc.choice
 					}
+					tools, ok := request["tools"].([]any)
+					if !ok {
+						t.Fatal("fixture tools must be an array")
+					}
 					// A second declared tool makes the wrong-named result parseable.
-					if protocol == "chat" {
-						request["tools"] = append(request["tools"].([]any), map[string]any{"type": "function", "function": map[string]any{"name": "other_file", "parameters": map[string]string{"type": "object"}}})
-					} else if protocol == "responses" {
-						request["tools"] = append(request["tools"].([]any), map[string]any{"type": "function", "name": "other_file", "parameters": map[string]string{"type": "object"}})
-					} else {
-						request["tools"] = append(request["tools"].([]any), map[string]any{"name": "other_file", "input_schema": map[string]string{"type": "object"}})
+					switch protocol {
+					case "chat":
+						request["tools"] = append(tools, map[string]any{"type": "function", "function": map[string]any{"name": "other_file", "parameters": map[string]string{"type": "object"}}})
+					case "responses":
+						request["tools"] = append(tools, map[string]any{"type": "function", "name": "other_file", "parameters": map[string]string{"type": "object"}})
+					default:
+						request["tools"] = append(tools, map[string]any{"name": "other_file", "input_schema": map[string]string{"type": "object"}})
 					}
 					if strings.HasPrefix(tc.name, "reserved_") {
 						var declared map[string]any
@@ -124,7 +129,11 @@ func TestRequiredClientToolsContract(t *testing.T) {
 						default:
 							declared = map[string]any{"name": tc.choice, "input_schema": map[string]string{"type": "object"}}
 						}
-						request["tools"] = append(request["tools"].([]any), declared)
+						tools, ok = request["tools"].([]any)
+						if !ok {
+							t.Fatal("fixture tools must be an array")
+						}
+						request["tools"] = append(tools, declared)
 					}
 					encoded, err := json.Marshal(request)
 					if err != nil {
@@ -136,7 +145,7 @@ func TestRequiredClientToolsContract(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer resp.Body.Close()
+					defer func() { _ = resp.Body.Close() }()
 					data, err := io.ReadAll(resp.Body)
 					if err != nil {
 						t.Fatal(err)
