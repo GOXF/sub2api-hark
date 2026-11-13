@@ -344,7 +344,7 @@ diff --git a/declined.go b/declined.go
 new file mode 100644
 --- /dev/null
 +++ b/declined.go
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,43 @@
 +package gateway
 +
 +import (
@@ -364,6 +364,18 @@ new file mode 100644
 +	text := strings.TrimSpace(m.Content)
 +	if utf8.RuneCountInString(text) > 512 || strings.ContainsAny(text, "\r\n`\"“”") {
 +		return false
++	}
++	// Observed production bubbles use several other wordings. Match their
++	// complete text, not arbitrary refusal keywords or an unbounded suffix.
++	switch text {
++	case "Hark 不能当作其他应用背后的模型来用。你想做成什么事可以直接告诉我，我很乐意帮忙。",
++		"Hark 不能当作别的应用背后的模型来用。你想做成什么事，直接告诉我，我很乐意帮忙。",
++		"我没法充当其他应用背后的模型，你可以直接告诉我想做成什么，我会在这里帮你。",
++		"Hark 不能被当作其他应用背后的模型来调用。如果你告诉我你实际想完成什么，我很乐意直接在这里帮你。",
++		"Hark 不能作为其他应用背后的模型来使用。如果你告诉我你想做成什么，我很乐意直接帮你。",
++		"Hark 不支持作为其他应用背后的模型来使用。如果你告诉我你想完成什么，我很乐意直接在这里帮你。",
++		"Hark 不能用作其他应用背后的模型。不过如果你告诉我你想完成什么，我很乐意直接在这里帮你。":
++		return true
 +	}
 +	for _, prefix := range []string{
 +		"抱歉，Hark 不支持作为其他应用背后的模型来使用。",
@@ -532,6 +544,131 @@ diff --git a/messages.go b/messages.go
 -	if v.ToolChoice == "none" {
 +	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
 +	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
+diff --git a/observed_refusals_test.go b/observed_refusals_test.go
+new file mode 100644
+--- /dev/null
++++ b/observed_refusals_test.go
+@@ -0,0 +1,120 @@
++package gateway
++
++import (
++	"encoding/json"
++	"os"
++	"testing"
++)
++
++type observedRefusalTurn struct {
++	RequestID string        `json:"request_id"`
++	Expected  string        `json:"expected"`
++	Messages  []harkMessage `json:"messages"`
++}
++
++func observedRefusalTurns(t *testing.T) []observedRefusalTurn {
++	t.Helper()
++	b, err := os.ReadFile("testdata/observed_refusals_20261113.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var trace struct {
++		Turns []observedRefusalTurn `json:"turns"`
++	}
++	if err := json.Unmarshal(b, &trace); err != nil {
++		t.Fatal(err)
++	}
++	if len(trace.Turns) != 7 {
++		t.Fatalf("want 7 observed turns, got %d", len(trace.Turns))
++	}
++	return trace.Turns
++}
++
++func observedRefusalText(turn observedRefusalTurn) string {
++	for _, m := range turn.Messages {
++		if m.Source == "send_bubble" {
++			return m.Content
++		}
++	}
++	return ""
++}
++
++// Rebind fixture IDs only; retain the actual four-event order and metadata.
++func observedRefusalMessages(turn observedRefusalTurn, user, primary string) []harkMessage {
++	messages := append([]harkMessage(nil), turn.Messages...)
++	for i := range messages {
++		m := &messages[i]
++		if m.ID == turn.RequestID {
++			m.ID = user
++		}
++		if m.ID == turn.Expected {
++			m.ID = primary
++		}
++		if m.TriggeredBy == turn.RequestID {
++			m.TriggeredBy = user
++		}
++	}
++	return messages
++}
++
++func TestObservedRefusalOutcomes(t *testing.T) {
++	for _, turn := range observedRefusalTurns(t) {
++		t.Run(turn.RequestID, func(t *testing.T) {
++			want := observedRefusalText(turn)
++			if want == "" {
++				t.Fatal("missing observed refusal")
++			}
++			reply, err := completedProjectReply(turn.Messages, turn.Expected, turn.RequestID)
++			if err != nil || reply.Outcome != "declined" || reply.Text != want {
++				t.Fatalf("outcome=%q body_preserved=%t err=%v", reply.Outcome, reply.Text == want, err)
++			}
++			if err := compactionFailure(true, &turnResult{Outcome: reply.Outcome, Text: reply.Text}); err == nil {
++				t.Fatal("refusal accepted as checkpoint summary")
++			}
++			for _, variant := range []string{"quote", "quoted", "code", "user", "other_turn", "summary", "streaming", "unknown_streaming", "wrong_source", "negation", "with_work", "same_line_work", "ordinary"} {
++				t.Run(variant, func(t *testing.T) {
++					messages := append([]harkMessage(nil), turn.Messages...)
++					for i := range messages {
++						m := &messages[i]
++						if m.Source != "send_bubble" {
++							continue
++						}
++						switch variant {
++						case "quote":
++							m.Content = "> " + m.Content
++						case "quoted":
++							m.Content = "“" + m.Content + "”"
++						case "code":
++							m.Content = "`" + m.Content + "`"
++						case "user":
++							m.Role = "user"
++						case "other_turn":
++							m.TriggeredBy = "unrelated-turn"
++						case "summary":
++							m.Presentation.Kind = "summary"
++						case "streaming":
++							yes := true
++							m.Streaming = &yes
++						case "unknown_streaming":
++							m.Streaming = nil
++						case "wrong_source":
++							m.Source = "web"
++						case "negation":
++							m.Content = "并不是这样：" + m.Content
++						case "with_work":
++							m.Content += "\n已执行修改。"
++						case "same_line_work":
++							m.Content += "已执行修改。"
++						case "ordinary":
++							m.Content = "普通任务已完成，结果是 2。"
++						}
++					}
++					reply, _ := completedProjectReply(messages, turn.Expected, turn.RequestID)
++					if reply.Outcome == "declined" {
++						t.Fatal("non-authoritative/ordinary reply classified as refusal")
++					}
++				})
++			}
++		})
++	}
++}
 diff --git a/proxy_pool.go b/proxy_pool.go
 --- a/proxy_pool.go
 +++ b/proxy_pool.go
@@ -766,6 +903,303 @@ new file mode 100644
 +          "presentation": {
 +            "kind": "text"
 +          }
++        }
++      ]
++    }
++  ]
++}
+diff --git a/testdata/observed_refusals_20261113.json b/testdata/observed_refusals_20261113.json
+new file mode 100644
+--- /dev/null
++++ b/testdata/observed_refusals_20261113.json
+@@ -0,0 +1,292 @@
++{
++  "provenance": "Seven completed production histories observed 2026-11-13; message links/source/status/order and refusal bodies preserved, identifiers/user input anonymized; no credentials or private prompts.",
++  "turns": [
++    {
++      "request_id": "observed-1-message-1",
++      "expected": "observed-1-message-2",
++      "messages": [
++        {
++          "id": "observed-1-message-1",
++          "role": "user",
++          "source": "web",
++          "content": "fixture input"
++        },
++        {
++          "id": "observed-1-message-2",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-1-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        },
++        {
++          "id": "observed-1-message-3",
++          "role": "assistant",
++          "source": "send_bubble",
++          "content": "Hark 不能当作其他应用背后的模型来用。你想做成什么事可以直接告诉我，我很乐意帮忙。",
++          "triggeredByMessageId": "observed-1-message-1",
++          "isStreaming": false,
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        {
++          "id": "observed-1-message-4",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-1-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        }
++      ]
++    },
++    {
++      "request_id": "observed-2-message-1",
++      "expected": "observed-2-message-2",
++      "messages": [
++        {
++          "id": "observed-2-message-1",
++          "role": "user",
++          "source": "web",
++          "content": "fixture input"
++        },
++        {
++          "id": "observed-2-message-2",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-2-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        },
++        {
++          "id": "observed-2-message-3",
++          "role": "assistant",
++          "source": "send_bubble",
++          "content": "Hark 不能当作别的应用背后的模型来用。你想做成什么事，直接告诉我，我很乐意帮忙。",
++          "triggeredByMessageId": "observed-2-message-1",
++          "isStreaming": false,
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        {
++          "id": "observed-2-message-4",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-2-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        }
++      ]
++    },
++    {
++      "request_id": "observed-3-message-1",
++      "expected": "observed-3-message-2",
++      "messages": [
++        {
++          "id": "observed-3-message-1",
++          "role": "user",
++          "source": "web",
++          "content": "fixture input"
++        },
++        {
++          "id": "observed-3-message-2",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-3-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        },
++        {
++          "id": "observed-3-message-3",
++          "role": "assistant",
++          "source": "send_bubble",
++          "content": "我没法充当其他应用背后的模型，你可以直接告诉我想做成什么，我会在这里帮你。",
++          "triggeredByMessageId": "observed-3-message-1",
++          "isStreaming": false,
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        {
++          "id": "observed-3-message-4",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-3-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        }
++      ]
++    },
++    {
++      "request_id": "observed-4-message-1",
++      "expected": "observed-4-message-2",
++      "messages": [
++        {
++          "id": "observed-4-message-1",
++          "role": "user",
++          "source": "web",
++          "content": "fixture input"
++        },
++        {
++          "id": "observed-4-message-2",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-4-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        },
++        {
++          "id": "observed-4-message-3",
++          "role": "assistant",
++          "source": "send_bubble",
++          "content": "Hark 不能被当作其他应用背后的模型来调用。如果你告诉我你实际想完成什么，我很乐意直接在这里帮你。",
++          "triggeredByMessageId": "observed-4-message-1",
++          "isStreaming": false,
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        {
++          "id": "observed-4-message-4",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-4-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        }
++      ]
++    },
++    {
++      "request_id": "observed-5-message-1",
++      "expected": "observed-5-message-2",
++      "messages": [
++        {
++          "id": "observed-5-message-1",
++          "role": "user",
++          "source": "web",
++          "content": "fixture input"
++        },
++        {
++          "id": "observed-5-message-2",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-5-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        },
++        {
++          "id": "observed-5-message-3",
++          "role": "assistant",
++          "source": "send_bubble",
++          "content": "Hark 不能作为其他应用背后的模型来使用。如果你告诉我你想做成什么，我很乐意直接帮你。",
++          "triggeredByMessageId": "observed-5-message-1",
++          "isStreaming": false,
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        {
++          "id": "observed-5-message-4",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-5-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        }
++      ]
++    },
++    {
++      "request_id": "observed-6-message-1",
++      "expected": "observed-6-message-2",
++      "messages": [
++        {
++          "id": "observed-6-message-1",
++          "role": "user",
++          "source": "web",
++          "content": "fixture input"
++        },
++        {
++          "id": "observed-6-message-2",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-6-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        },
++        {
++          "id": "observed-6-message-3",
++          "role": "assistant",
++          "source": "send_bubble",
++          "content": "Hark 不支持作为其他应用背后的模型来使用。如果你告诉我你想完成什么，我很乐意直接在这里帮你。",
++          "triggeredByMessageId": "observed-6-message-1",
++          "isStreaming": false,
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        {
++          "id": "observed-6-message-4",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-6-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        }
++      ]
++    },
++    {
++      "request_id": "observed-7-message-1",
++      "expected": "observed-7-message-2",
++      "messages": [
++        {
++          "id": "observed-7-message-1",
++          "role": "user",
++          "source": "web",
++          "content": "fixture input"
++        },
++        {
++          "id": "observed-7-message-2",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-7-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
++        },
++        {
++          "id": "observed-7-message-3",
++          "role": "assistant",
++          "source": "send_bubble",
++          "content": "Hark 不能用作其他应用背后的模型。不过如果你告诉我你想完成什么，我很乐意直接在这里帮你。",
++          "triggeredByMessageId": "observed-7-message-1",
++          "isStreaming": false,
++          "presentation": {
++            "kind": "text"
++          }
++        },
++        {
++          "id": "observed-7-message-4",
++          "role": "assistant",
++          "source": "web",
++          "content": "",
++          "triggeredByMessageId": "observed-7-message-1",
++          "jobStatus": "completed",
++          "isStreaming": false
 +        }
 +      ]
 +    }
@@ -1929,7 +2363,7 @@ diff --git a/turn_status_stream_test.go b/turn_status_stream_test.go
 new file mode 100644
 --- /dev/null
 +++ b/turn_status_stream_test.go
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,294 @@
 +package gateway
 +
 +import (
@@ -1961,10 +2395,17 @@ new file mode 100644
 +
 +func TestTurnStatusStreamingProtocols(t *testing.T) {
 +	for _, protocol := range []string{"chat", "messages", "responses"} {
-+		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy"} {
++		kinds := []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy"}
++		observed := observedRefusalTurns(t)
++		for i := range observed {
++			for _, suffix := range []string{"declined", "declined_json", "compaction", "compaction_json", "compaction_legacy"} {
++				kinds = append(kinds, fmt.Sprintf("observed_%d_%s", i, suffix))
++			}
++		}
++		for _, kind := range kinds {
 +			t.Run(protocol+"/"+kind, func(t *testing.T) {
 +				opt := !strings.Contains(kind, "legacy")
-+				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot")
++				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot") || strings.HasPrefix(kind, "observed_")
 +				stream := !strings.HasSuffix(kind, "_json")
 +				compact := strings.Contains(kind, "compaction")
 +				bodyText := "ORIGINAL_BODY"
@@ -1973,6 +2414,13 @@ new file mode 100644
 +				}
 +				if strings.HasPrefix(kind, "screenshot") {
 +					bodyText = "抱歉，Hark 不支持作为其他应用背后的模型来使用。如果你告诉我想完成什么，比如把接码授权页改成和注册引擎一样的布局，我很乐意在这里直接帮你。"
++				}
++				observedIndex := -1
++				if strings.HasPrefix(kind, "observed_") {
++					if _, err := fmt.Sscanf(kind, "observed_%d", &observedIndex); err != nil {
++						t.Fatal(err)
++					}
++					bodyText = observedRefusalText(observed[observedIndex])
 +				}
 +				var sends atomic.Int32
 +				gate := make(chan struct{})
@@ -2025,6 +2473,12 @@ new file mode 100644
 +						messages := []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": bodyText, "source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "inputNeeded": strings.Contains(kind, "waiting")}}
 +						if strings.HasPrefix(kind, "native_") {
 +							messages = []any{map[string]any{"id": u, "role": "user"}, map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false}, map[string]any{"id": "notice", "role": "assistant", "source": "declined_notice", "presentation": map[string]string{"kind": "declined"}, "isStreaming": false, "content": bodyText}}
++						}
++						if observedIndex >= 0 {
++							messages = nil
++							for _, m := range observedRefusalMessages(observed[observedIndex], u, a) {
++								messages = append(messages, m)
++							}
 +						}
 +						json.NewEncoder(w).Encode(map[string]any{"messages": messages})
 +					default:

@@ -29,10 +29,17 @@ func (w *statusTestRecorder) Write(b []byte) (int, error) {
 
 func TestTurnStatusStreamingProtocols(t *testing.T) {
 	for _, protocol := range []string{"chat", "messages", "responses"} {
-		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy"} {
+		kinds := []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy"}
+		observed := observedRefusalTurns(t)
+		for i := range observed {
+			for _, suffix := range []string{"declined", "declined_json", "compaction", "compaction_json", "compaction_legacy"} {
+				kinds = append(kinds, fmt.Sprintf("observed_%d_%s", i, suffix))
+			}
+		}
+		for _, kind := range kinds {
 			t.Run(protocol+"/"+kind, func(t *testing.T) {
 				opt := !strings.Contains(kind, "legacy")
-				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot")
+				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot") || strings.HasPrefix(kind, "observed_")
 				stream := !strings.HasSuffix(kind, "_json")
 				compact := strings.Contains(kind, "compaction")
 				bodyText := "ORIGINAL_BODY"
@@ -41,6 +48,13 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				}
 				if strings.HasPrefix(kind, "screenshot") {
 					bodyText = "抱歉，Hark 不支持作为其他应用背后的模型来使用。如果你告诉我想完成什么，比如把接码授权页改成和注册引擎一样的布局，我很乐意在这里直接帮你。"
+				}
+				observedIndex := -1
+				if strings.HasPrefix(kind, "observed_") {
+					if _, err := fmt.Sscanf(kind, "observed_%d", &observedIndex); err != nil {
+						t.Fatal(err)
+					}
+					bodyText = observedRefusalText(observed[observedIndex])
 				}
 				var sends atomic.Int32
 				gate := make(chan struct{})
@@ -93,6 +107,12 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 						messages := []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": bodyText, "source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "inputNeeded": strings.Contains(kind, "waiting")}}
 						if strings.HasPrefix(kind, "native_") {
 							messages = []any{map[string]any{"id": u, "role": "user"}, map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false}, map[string]any{"id": "notice", "role": "assistant", "source": "declined_notice", "presentation": map[string]string{"kind": "declined"}, "isStreaming": false, "content": bodyText}}
+						}
+						if observedIndex >= 0 {
+							messages = nil
+							for _, m := range observedRefusalMessages(observed[observedIndex], u, a) {
+								messages = append(messages, m)
+							}
 						}
 						json.NewEncoder(w).Encode(map[string]any{"messages": messages})
 					default:

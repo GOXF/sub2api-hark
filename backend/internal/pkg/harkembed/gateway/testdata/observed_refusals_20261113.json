@@ -1,0 +1,292 @@
+{
+  "provenance": "Seven completed production histories observed 2026-11-13; message links/source/status/order and refusal bodies preserved, identifiers/user input anonymized; no credentials or private prompts.",
+  "turns": [
+    {
+      "request_id": "observed-1-message-1",
+      "expected": "observed-1-message-2",
+      "messages": [
+        {
+          "id": "observed-1-message-1",
+          "role": "user",
+          "source": "web",
+          "content": "fixture input"
+        },
+        {
+          "id": "observed-1-message-2",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-1-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        },
+        {
+          "id": "observed-1-message-3",
+          "role": "assistant",
+          "source": "send_bubble",
+          "content": "Hark 不能当作其他应用背后的模型来用。你想做成什么事可以直接告诉我，我很乐意帮忙。",
+          "triggeredByMessageId": "observed-1-message-1",
+          "isStreaming": false,
+          "presentation": {
+            "kind": "text"
+          }
+        },
+        {
+          "id": "observed-1-message-4",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-1-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        }
+      ]
+    },
+    {
+      "request_id": "observed-2-message-1",
+      "expected": "observed-2-message-2",
+      "messages": [
+        {
+          "id": "observed-2-message-1",
+          "role": "user",
+          "source": "web",
+          "content": "fixture input"
+        },
+        {
+          "id": "observed-2-message-2",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-2-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        },
+        {
+          "id": "observed-2-message-3",
+          "role": "assistant",
+          "source": "send_bubble",
+          "content": "Hark 不能当作别的应用背后的模型来用。你想做成什么事，直接告诉我，我很乐意帮忙。",
+          "triggeredByMessageId": "observed-2-message-1",
+          "isStreaming": false,
+          "presentation": {
+            "kind": "text"
+          }
+        },
+        {
+          "id": "observed-2-message-4",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-2-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        }
+      ]
+    },
+    {
+      "request_id": "observed-3-message-1",
+      "expected": "observed-3-message-2",
+      "messages": [
+        {
+          "id": "observed-3-message-1",
+          "role": "user",
+          "source": "web",
+          "content": "fixture input"
+        },
+        {
+          "id": "observed-3-message-2",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-3-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        },
+        {
+          "id": "observed-3-message-3",
+          "role": "assistant",
+          "source": "send_bubble",
+          "content": "我没法充当其他应用背后的模型，你可以直接告诉我想做成什么，我会在这里帮你。",
+          "triggeredByMessageId": "observed-3-message-1",
+          "isStreaming": false,
+          "presentation": {
+            "kind": "text"
+          }
+        },
+        {
+          "id": "observed-3-message-4",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-3-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        }
+      ]
+    },
+    {
+      "request_id": "observed-4-message-1",
+      "expected": "observed-4-message-2",
+      "messages": [
+        {
+          "id": "observed-4-message-1",
+          "role": "user",
+          "source": "web",
+          "content": "fixture input"
+        },
+        {
+          "id": "observed-4-message-2",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-4-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        },
+        {
+          "id": "observed-4-message-3",
+          "role": "assistant",
+          "source": "send_bubble",
+          "content": "Hark 不能被当作其他应用背后的模型来调用。如果你告诉我你实际想完成什么，我很乐意直接在这里帮你。",
+          "triggeredByMessageId": "observed-4-message-1",
+          "isStreaming": false,
+          "presentation": {
+            "kind": "text"
+          }
+        },
+        {
+          "id": "observed-4-message-4",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-4-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        }
+      ]
+    },
+    {
+      "request_id": "observed-5-message-1",
+      "expected": "observed-5-message-2",
+      "messages": [
+        {
+          "id": "observed-5-message-1",
+          "role": "user",
+          "source": "web",
+          "content": "fixture input"
+        },
+        {
+          "id": "observed-5-message-2",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-5-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        },
+        {
+          "id": "observed-5-message-3",
+          "role": "assistant",
+          "source": "send_bubble",
+          "content": "Hark 不能作为其他应用背后的模型来使用。如果你告诉我你想做成什么，我很乐意直接帮你。",
+          "triggeredByMessageId": "observed-5-message-1",
+          "isStreaming": false,
+          "presentation": {
+            "kind": "text"
+          }
+        },
+        {
+          "id": "observed-5-message-4",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-5-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        }
+      ]
+    },
+    {
+      "request_id": "observed-6-message-1",
+      "expected": "observed-6-message-2",
+      "messages": [
+        {
+          "id": "observed-6-message-1",
+          "role": "user",
+          "source": "web",
+          "content": "fixture input"
+        },
+        {
+          "id": "observed-6-message-2",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-6-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        },
+        {
+          "id": "observed-6-message-3",
+          "role": "assistant",
+          "source": "send_bubble",
+          "content": "Hark 不支持作为其他应用背后的模型来使用。如果你告诉我你想完成什么，我很乐意直接在这里帮你。",
+          "triggeredByMessageId": "observed-6-message-1",
+          "isStreaming": false,
+          "presentation": {
+            "kind": "text"
+          }
+        },
+        {
+          "id": "observed-6-message-4",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-6-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        }
+      ]
+    },
+    {
+      "request_id": "observed-7-message-1",
+      "expected": "observed-7-message-2",
+      "messages": [
+        {
+          "id": "observed-7-message-1",
+          "role": "user",
+          "source": "web",
+          "content": "fixture input"
+        },
+        {
+          "id": "observed-7-message-2",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-7-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        },
+        {
+          "id": "observed-7-message-3",
+          "role": "assistant",
+          "source": "send_bubble",
+          "content": "Hark 不能用作其他应用背后的模型。不过如果你告诉我你想完成什么，我很乐意直接在这里帮你。",
+          "triggeredByMessageId": "observed-7-message-1",
+          "isStreaming": false,
+          "presentation": {
+            "kind": "text"
+          }
+        },
+        {
+          "id": "observed-7-message-4",
+          "role": "assistant",
+          "source": "web",
+          "content": "",
+          "triggeredByMessageId": "observed-7-message-1",
+          "jobStatus": "completed",
+          "isStreaming": false
+        }
+      ]
+    }
+  ]
+}
