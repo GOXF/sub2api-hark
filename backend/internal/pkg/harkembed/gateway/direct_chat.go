@@ -301,6 +301,15 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 	}
 	if primaryDone && !pending {
 		if len(parts) > 0 || len(files) > 0 {
+			// Plain-text refusals can accompany completed jobs. Only classify an
+			// otherwise empty result with one evidenced, turn-bound text bubble.
+			if len(parts) == 1 && len(files) == 0 {
+				for _, m := range messages {
+					if boundToTurn(m, expected, requestID) && recordedBackendRefusal(m) {
+						return projectReply{Text: parts[0], Outcome: "declined"}, nil
+					}
+				}
+			}
 			return projectReply{Text: strings.Join(parts, "\n\n"), Outcome: "completed", Attachments: files}, nil
 		}
 		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
@@ -487,6 +496,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 				case <-ctx.Done():
 				}
 				timer.Stop()
+				if reply.Outcome == "declined" {
+					statusTracker.finishDeclined()
+				}
 			}
 			return reply, nil
 		}

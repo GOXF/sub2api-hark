@@ -29,9 +29,20 @@ func (w *statusTestRecorder) Write(b []byte) (int, error) {
 
 func TestTurnStatusStreamingProtocols(t *testing.T) {
 	for _, protocol := range []string{"chat", "messages", "responses"} {
-		for _, kind := range []string{"ended", "waiting", "legacy", "required_error"} {
+		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy"} {
 			t.Run(protocol+"/"+kind, func(t *testing.T) {
-				opt := kind != "legacy"
+				opt := !strings.Contains(kind, "legacy")
+				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot")
+				stream := !strings.HasSuffix(kind, "_json")
+				compact := strings.Contains(kind, "compaction")
+				bodyText := "ORIGINAL_BODY"
+				if declined {
+					bodyText = "抱歉，Hark 不能作为其他应用背后的模型来使用。"
+				}
+				if strings.HasPrefix(kind, "screenshot") {
+					bodyText = "抱歉，Hark 不支持作为其他应用背后的模型来使用。如果你告诉我想完成什么，比如把接码授权页改成和注册引擎一样的布局，我很乐意在这里直接帮你。"
+				}
+				var sends atomic.Int32
 				gate := make(chan struct{})
 				var syncCalls atomic.Int32
 				var mu sync.Mutex
@@ -42,6 +53,7 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 					case "/api/conversations":
 						json.NewEncoder(w).Encode(map[string]string{"conversationId": "status-fixture"})
 					case "/api/messages/send":
+						sends.Add(1)
 						var p map[string]json.RawMessage
 						json.NewDecoder(r.Body).Decode(&p)
 						if _, leaked := p["hark_status"]; leaked {
@@ -55,6 +67,10 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 						json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "status-fixture", "messageId": u, "redirected": false})
 					case "/api/sync/conversation":
 						syncCalls.Add(1)
+						if strings.Contains(kind, "no_sync") {
+							http.Error(w, "optional feed unavailable", 503)
+							return
+						}
 						mu.Lock()
 						u, a := userID, responseID
 						mu.Unlock()
@@ -64,7 +80,7 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 						w.(http.Flusher).Flush()
 						<-r.Context().Done()
 					case "/api/messages/history":
-						if opt {
+						if opt && stream && !strings.Contains(kind, "no_sync") {
 							select {
 							case <-gate:
 							case <-r.Context().Done():
@@ -74,7 +90,11 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 						mu.Lock()
 						u, a := userID, responseID
 						mu.Unlock()
-						json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": "ORIGINAL_BODY", "inputNeeded": kind == "waiting"}}})
+						messages := []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": bodyText, "source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "inputNeeded": strings.Contains(kind, "waiting")}}
+						if strings.HasPrefix(kind, "native_") {
+							messages = []any{map[string]any{"id": u, "role": "user"}, map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false}, map[string]any{"id": "notice", "role": "assistant", "source": "declined_notice", "presentation": map[string]string{"kind": "declined"}, "isStreaming": false, "content": bodyText}}
+						}
+						json.NewEncoder(w).Encode(map[string]any{"messages": messages})
 					default:
 						http.Error(w, "fixture missing", 404)
 					}
@@ -84,9 +104,13 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				body := map[string]any{"model": "hark", "stream": true, "hark_status": opt}
+				body := map[string]any{"model": "hark", "stream": stream, "hark_status": opt}
 				path := "/v1/chat/completions"
-				body["messages"] = []any{map[string]string{"role": "user", "content": "fixture"}}
+				question := "fixture"
+				if compact {
+					question = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work."
+				}
+				body["messages"] = []any{map[string]string{"role": "user", "content": question}}
 				if protocol == "messages" {
 					path = "/v1/messages"
 					body["max_tokens"] = 100
@@ -94,9 +118,9 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				if protocol == "responses" {
 					path = "/v1/responses"
 					delete(body, "messages")
-					body["input"] = "fixture"
+					body["input"] = question
 				}
-				if kind == "required_error" {
+				if kind == "required_error" || kind == "declined_required" {
 					body["tool_choice"] = "required"
 					body["tools"] = []any{map[string]any{"type": "function", "function": map[string]any{"name": "fixture_read", "parameters": map[string]string{"type": "object"}}}}
 					if protocol == "responses" {
@@ -116,13 +140,55 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				writer := &statusTestRecorder{ResponseRecorder: httptest.NewRecorder(), gate: gate}
 				server.EmbeddedHandler().ServeHTTP(writer, req)
 				text := writer.Body.String()
+				if sends.Load() != 1 {
+					t.Fatalf("accepted request replayed: %d", sends.Load())
+				}
+				if compact {
+					if !strings.Contains(text, "upstream_compaction_declined") || !strings.Contains(text, bodyText) {
+						t.Fatalf("compaction refusal not failed with original diagnostic: %d %s", writer.Code, text)
+					}
+					if stream {
+						for _, success := range []string{"event: response.completed", `"finish_reason":"stop"`, "event: message_stop"} {
+							if strings.Contains(text, success) {
+								t.Fatalf("refused summary emitted success %s: %s", success, text)
+							}
+						}
+						if protocol == "responses" && !strings.Contains(text, "event: response.failed") {
+							t.Fatal("missing native failure event")
+						}
+					} else if writer.Code != 422 {
+						t.Fatalf("want non-retryable 422, got %d", writer.Code)
+					}
+					return
+				}
+				if !stream {
+					if writer.Code != 200 || writer.Header().Get("X-Hark-Upstream-Outcome") != "declined" || !strings.Contains(text, bodyText) || strings.Contains(text, "hark.status") || syncCalls.Load() != 0 {
+						t.Fatalf("nonstream body/outcome changed: %d %s", writer.Code, text)
+					}
+					return
+				}
+				if declined && writer.Result().Trailer.Get("X-Hark-Upstream-Outcome") != "declined" {
+					t.Fatal("declined outcome trailer missing")
+				}
+				if kind == "declined_required" {
+					if !strings.Contains(text, "tool_call_missing") || !strings.Contains(text, `"reason":"upstream_declined"`) || strings.Contains(text, bodyText) || strings.Contains(text, `"reason":"error"`) {
+						t.Fatalf("refusal masked tool contract: %s", text)
+					}
+					return
+				}
+				if declined && opt {
+					if !strings.Contains(text, bodyText) || !strings.Contains(text, `"status":"ended"`) || strings.Count(text, `"reason":"upstream_declined"`) != 1 || strings.Contains(text, `"reason":"stream_ended"`) {
+						t.Fatalf("refusal status lost or body replaced: %s", text)
+					}
+					return
+				}
 				if kind == "required_error" {
 					if writer.Code != 200 || !strings.Contains(text, "tool_call_missing") || strings.Contains(text, "ORIGINAL_BODY") || !strings.Contains(text, `"reason":"error"`) {
 						t.Fatalf("required-tool status masked execution failure: %d %s", writer.Code, text)
 					}
 					return
 				}
-				if writer.Code != 200 || !strings.Contains(text, "ORIGINAL_BODY") {
+				if writer.Code != 200 || !strings.Contains(text, bodyText) {
 					t.Fatalf("body changed: %d %s", writer.Code, text)
 				}
 				if strings.Contains(text, "PRIVATE_THOUGHT") {

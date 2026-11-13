@@ -140,7 +140,8 @@ func (scope identityReplyScope) adapt(text string) (string, bool) {
 		}
 	}
 	lower := strings.ToLower(identity)
-	if !(scope.model != "" && strings.Contains(identity, scope.model) || strings.Contains(lower, "模型") || strings.Contains(lower, "model") || strings.Contains(lower, "配置名") || strings.Contains(lower, "我是") || strings.Contains(lower, "i am") || strings.Contains(lower, "i'm") || strings.Contains(lower, "assistant")) || scope.model == "" && !strings.Contains(lower, "hark") {
+	hasIdentity := scope.model != "" && strings.Contains(identity, scope.model) || strings.Contains(lower, "模型") || strings.Contains(lower, "model") || strings.Contains(lower, "配置名") || strings.Contains(lower, "我是") || strings.Contains(lower, "i am") || strings.Contains(lower, "i'm") || strings.Contains(lower, "assistant")
+	if !hasIdentity || scope.model == "" && !strings.Contains(lower, "hark") {
 		return text, false
 	}
 	if !scope.mixed {
@@ -400,7 +401,7 @@ func adaptIdentitySSE(data []byte, format labelFormat, scope identityReplyScope)
 			if root.Get("index").Int() != 0 || root.Get("content_index").Int() != 0 || root.Get("output_index").Int() != 0 {
 				return data
 			}
-			text.WriteString(root.Get(path).Str)
+			_, _ = text.WriteString(root.Get(path).Str)
 		}
 	}
 	adapted, changed := scope.adapt(text.String())

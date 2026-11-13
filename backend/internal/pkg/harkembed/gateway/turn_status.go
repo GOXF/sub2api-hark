@@ -85,6 +85,9 @@ func (s *turnStatusTracker) syncStopped() {
 }
 
 func (s *turnStatusTracker) publish(m harkMessage) {
+	if s.last.Status == "ended" {
+		return
+	}
 	state := "processing"
 	if s.waiting {
 		state = "waiting_for_user"
@@ -108,6 +111,22 @@ func (s *turnStatusTracker) publish(m harkMessage) {
 	s.last = next
 	if s.notify != nil {
 		s.notify(next)
+	}
+}
+
+// A completed refusal is terminal even after awaitsPerson. Synthesize identity
+// from the accepted turn when the optional live feed carried no narration.
+func (s *turnStatusTracker) finishDeclined() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last.Reason == "upstream_declined" {
+		return
+	}
+	s.sequence++
+	s.last = turnStatus{Type: "hark.status", Status: "ended", ConversationID: s.cid,
+		RequestID: s.requestID, MessageID: s.expected, Sequence: s.sequence, Reason: "upstream_declined"}
+	if s.notify != nil {
+		s.notify(s.last)
 	}
 }
 

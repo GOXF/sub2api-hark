@@ -133,7 +133,7 @@ func testIdentityUpstreamGeneration(t *testing.T, mode string) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer resp.Body.Close()
+					defer func() { _ = resp.Body.Close() }()
 					data, err := io.ReadAll(resp.Body)
 					if err != nil || resp.StatusCode != http.StatusOK {
 						t.Fatalf("status=%d read=%v body=%s", resp.StatusCode, err, data)
@@ -205,13 +205,13 @@ func identityForwardText(protocol string, stream bool, body string) string {
 		data := strings.TrimPrefix(line, "data: ")
 		switch protocol {
 		case "chat":
-			text.WriteString(gjson.Get(data, "choices.0.delta.content").Str)
+			_, _ = text.WriteString(gjson.Get(data, "choices.0.delta.content").Str)
 		case "responses":
 			if gjson.Get(data, "type").Str == "response.output_text.delta" {
-				text.WriteString(gjson.Get(data, "delta").Str)
+				_, _ = text.WriteString(gjson.Get(data, "delta").Str)
 			}
 		case "messages":
-			text.WriteString(gjson.Get(data, "delta.text").Str)
+			_, _ = text.WriteString(gjson.Get(data, "delta.text").Str)
 		}
 	}
 	return text.String()

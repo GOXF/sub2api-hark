@@ -50,26 +50,26 @@ func identitySSEFixture(protocol, text string) string {
 	for index, chunk := range chunks {
 		switch protocol {
 		case "chat":
-			output.WriteString(frame("chunk", map[string]any{"id": "fixture-reply", "choices": []any{map[string]any{"index": 0, "delta": map[string]string{"content": chunk}}}}))
+			_, _ = output.WriteString(frame("chunk", map[string]any{"id": "fixture-reply", "choices": []any{map[string]any{"index": 0, "delta": map[string]string{"content": chunk}}}}))
 		case "responses":
-			output.WriteString(frame("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "delta": chunk, "sequence_number": index, "output_index": 0, "content_index": 0}))
+			_, _ = output.WriteString(frame("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "delta": chunk, "sequence_number": index, "output_index": 0, "content_index": 0}))
 		case "messages":
-			output.WriteString(frame("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": chunk}}))
+			_, _ = output.WriteString(frame("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": chunk}}))
 		}
 	}
 	switch protocol {
 	case "chat":
-		output.WriteString(frame("chunk", map[string]any{"id": "fixture-reply", "choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}}, "usage": map[string]int{"total_tokens": 137}}))
-		output.WriteString("data: [DONE]\n\n")
+		_, _ = output.WriteString(frame("chunk", map[string]any{"id": "fixture-reply", "choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}}, "usage": map[string]int{"total_tokens": 137}}))
+		_, _ = output.WriteString("data: [DONE]\n\n")
 	case "responses":
 		root := gjson.Parse(identityJSONFixture(protocol, text))
-		output.WriteString(frame("response.output_text.done", map[string]any{"type": "response.output_text.done", "text": text, "sequence_number": 2}))
-		output.WriteString(frame("response.content_part.done", map[string]any{"type": "response.content_part.done", "part": map[string]any{"type": "output_text", "text": text}}))
-		output.WriteString(frame("response.output_item.done", map[string]any{"type": "response.output_item.done", "item": json.RawMessage(root.Get("output.0").Raw)}))
-		output.WriteString(frame("response.completed", map[string]any{"type": "response.completed", "response": json.RawMessage(root.Raw), "sequence_number": 3}))
+		_, _ = output.WriteString(frame("response.output_text.done", map[string]any{"type": "response.output_text.done", "text": text, "sequence_number": 2}))
+		_, _ = output.WriteString(frame("response.content_part.done", map[string]any{"type": "response.content_part.done", "part": map[string]any{"type": "output_text", "text": text}}))
+		_, _ = output.WriteString(frame("response.output_item.done", map[string]any{"type": "response.output_item.done", "item": json.RawMessage(root.Get("output.0").Raw)}))
+		_, _ = output.WriteString(frame("response.completed", map[string]any{"type": "response.completed", "response": json.RawMessage(root.Raw), "sequence_number": 3}))
 	case "messages":
-		output.WriteString(frame("message_delta", map[string]any{"type": "message_delta", "delta": map[string]string{"stop_reason": "end_turn"}, "usage": map[string]int{"output_tokens": 137}}))
-		output.WriteString(frame("message_stop", map[string]string{"type": "message_stop"}))
+		_, _ = output.WriteString(frame("message_delta", map[string]any{"type": "message_delta", "delta": map[string]string{"stop_reason": "end_turn"}, "usage": map[string]int{"output_tokens": 137}}))
+		_, _ = output.WriteString(frame("message_stop", map[string]string{"type": "message_stop"}))
 	}
 	return output.String()
 }
@@ -218,7 +218,11 @@ func TestMappedIdentityRewritePreservesProtectedReplies(t *testing.T) {
 		if protocol == "responses" {
 			var value map[string]any
 			_ = json.Unmarshal([]byte(body), &value)
-			value["output"] = append(value["output"].([]any), map[string]any{"type": "local_shell_call", "action": map[string]any{"command": []string{"echo", "Hark"}}})
+			items, ok := value["output"].([]any)
+			if !ok {
+				t.Fatal("fixture output must be an array")
+			}
+			value["output"] = append(items, map[string]any{"type": "local_shell_call", "action": map[string]any{"command": []string{"echo", "Hark"}}})
 			encoded, _ := json.Marshal(value)
 			body = string(encoded)
 		}

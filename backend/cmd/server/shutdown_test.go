@@ -12,7 +12,12 @@ func TestShutdownDrainsActiveStreamBeyondFiveSeconds(t *testing.T) {
 	started, finish := make(chan struct{}), make(chan struct{})
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "partial\n")
-		w.(http.Flusher).Flush()
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("HTTP response does not support flushing")
+			return
+		}
+		flusher.Flush()
 		close(started)
 		<-finish
 		_, _ = io.WriteString(w, "complete\n")
@@ -28,7 +33,7 @@ func TestShutdownDrainsActiveStreamBeyondFiveSeconds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	<-started
 	timer := time.AfterFunc(5500*time.Millisecond, func() { close(finish) })
 	defer timer.Stop()

@@ -201,7 +201,7 @@ func (s *Server) prepareProject(ctx context.Context, a Account, zone string, fil
 func (s *Server) recordSuccess(accountID, outcome string) {
 	s.mu.Lock()
 	if outcome == "declined" {
-		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
+		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
 		s.mu.Unlock()
 		return
 	}
@@ -314,6 +314,7 @@ func commonPrefix(a, b string) int {
 }
 
 func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest, format outputFormat) {
+	compact := isCheckpointCompaction(v)
 	w.Header().Set("X-Hark-Context-Isolation", "instruction-only")
 	toolsNote := ""
 	switch {
@@ -349,11 +350,16 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	}
 	if !v.Stream {
 		err := s.runTurn(ctx, r, v, res, turnHooks{})
+		if err == nil {
+			err = compactionFailure(compact, res)
+			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
+		}
 		if err != nil {
 			s.turnFailed(w, r, ctx, err, format)
 			return
 		}
 		s.applyToolCalls(v, res)
+		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 			s.turnFailed(w, r, ctx, err, format)
 			return
@@ -407,7 +413,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			}
 			// A required-tool turn is validated before releasing assistant text.
 			// Keepalives still flow, and ordinary auto/none turns stay incremental.
-			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
+			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 				format.delta(emit, partial[len(emitted):])
 				emitted = partial
 				return
@@ -439,6 +445,10 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	err := s.runTurn(ctx, r, v, res, hooks)
 	mu.Lock()
 	defer mu.Unlock()
+	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
+	if err == nil {
+		err = compactionFailure(compact, res)
+	}
 	if err == nil {
 		s.applyToolCalls(v, res)
 		err = validateClientToolResult(v, res.ToolCalls)
@@ -449,7 +459,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			return
 		}
 		status, code, message := turnError(ctx, err)
-		if latestStatus.Type != "" && r.Context().Err() == nil {
+		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 			latestStatus.Sequence++
 			emit("hark.status", latestStatus)
@@ -480,7 +490,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			format.delta(emit, rest)
 		}
 	}
-	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" {
+	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
 		latestStatus.Sequence++
 		emit("hark.status", latestStatus)

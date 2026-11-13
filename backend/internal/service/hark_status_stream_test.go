@@ -78,3 +78,22 @@ func TestHarkStatusOnlyStreamNeverReplaysAcceptedTurn(t *testing.T) {
 	require.False(t, errors.As(err, &retry))
 	require.Nil(t, result.FirstTokenMs)
 }
+
+func TestHarkDeclinedStatusPreservesOriginalBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	account := rawChatCompletionsTestAccount()
+	account.Platform = PlatformHark
+	s := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+	const text = "抱歉，Hark 不能作为其他应用背后的模型来使用。"
+	stream := "event: hark.status\ndata: {\"type\":\"hark.status\",\"status\":\"ended\",\"reason\":\"upstream_declined\",\"conversation_id\":\"c\",\"request_id\":\"u\",\"sequence\":1}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"" + text + "\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	result, err := s.streamRawChatCompletions(c, &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader(stream))}, account, "mapped", "mapped", "hark", nil, nil, time.Now(), openAISilentRefusalMinRequestBodyBytes+100)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Contains(t, w.Body.String(), `"reason":"upstream_declined"`)
+	require.Contains(t, w.Body.String(), text)
+	require.Contains(t, w.Body.String(), "data: [DONE]")
+}
