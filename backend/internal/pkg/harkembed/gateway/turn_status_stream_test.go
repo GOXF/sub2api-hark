@@ -29,11 +29,12 @@ func (w *statusTestRecorder) Write(b []byte) (int, error) {
 
 func TestTurnStatusStreamingProtocols(t *testing.T) {
 	for _, protocol := range []string{"chat", "messages", "responses"} {
-		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json"} {
+		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy"} {
 			t.Run(protocol+"/"+kind, func(t *testing.T) {
 				opt := !strings.Contains(kind, "legacy")
 				declined := strings.Contains(kind, "declined")
 				stream := !strings.HasSuffix(kind, "_json")
+				compact := strings.Contains(kind, "compaction")
 				bodyText := "ORIGINAL_BODY"
 				if declined {
 					bodyText = "抱歉，Hark 不能作为其他应用背后的模型来使用。"
@@ -102,7 +103,11 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				}
 				body := map[string]any{"model": "hark", "stream": stream, "hark_status": opt}
 				path := "/v1/chat/completions"
-				body["messages"] = []any{map[string]string{"role": "user", "content": "fixture"}}
+				question := "fixture"
+				if compact {
+					question = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work."
+				}
+				body["messages"] = []any{map[string]string{"role": "user", "content": question}}
 				if protocol == "messages" {
 					path = "/v1/messages"
 					body["max_tokens"] = 100
@@ -110,7 +115,7 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				if protocol == "responses" {
 					path = "/v1/responses"
 					delete(body, "messages")
-					body["input"] = "fixture"
+					body["input"] = question
 				}
 				if kind == "required_error" || kind == "declined_required" {
 					body["tool_choice"] = "required"
@@ -134,6 +139,24 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				text := writer.Body.String()
 				if sends.Load() != 1 {
 					t.Fatalf("accepted request replayed: %d", sends.Load())
+				}
+				if compact {
+					if !strings.Contains(text, "upstream_compaction_declined") || !strings.Contains(text, bodyText) {
+						t.Fatalf("compaction refusal not failed with original diagnostic: %d %s", writer.Code, text)
+					}
+					if stream {
+						for _, success := range []string{"event: response.completed", `"finish_reason":"stop"`, "event: message_stop"} {
+							if strings.Contains(text, success) {
+								t.Fatalf("refused summary emitted success %s: %s", success, text)
+							}
+						}
+						if protocol == "responses" && !strings.Contains(text, "event: response.failed") {
+							t.Fatal("missing native failure event")
+						}
+					} else if writer.Code != 422 {
+						t.Fatalf("want non-retryable 422, got %d", writer.Code)
+					}
+					return
 				}
 				if !stream {
 					if writer.Code != 200 || writer.Header().Get("X-Hark-Upstream-Outcome") != "declined" || !strings.Contains(text, bodyText) || strings.Contains(text, "hark.status") || syncCalls.Load() != 0 {

@@ -314,6 +314,7 @@ func commonPrefix(a, b string) int {
 }
 
 func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest, format outputFormat) {
+	compact := isCheckpointCompaction(v)
 	w.Header().Set("X-Hark-Context-Isolation", "instruction-only")
 	toolsNote := ""
 	switch {
@@ -349,6 +350,10 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	}
 	if !v.Stream {
 		err := s.runTurn(ctx, r, v, res, turnHooks{})
+		if err == nil {
+			err = compactionFailure(compact, res)
+			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
+		}
 		if err != nil {
 			s.turnFailed(w, r, ctx, err, format)
 			return
@@ -408,7 +413,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			}
 			// A required-tool turn is validated before releasing assistant text.
 			// Keepalives still flow, and ordinary auto/none turns stay incremental.
-			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
+			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 				format.delta(emit, partial[len(emitted):])
 				emitted = partial
 				return
@@ -441,6 +446,9 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	mu.Lock()
 	defer mu.Unlock()
 	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
+	if err == nil {
+		err = compactionFailure(compact, res)
+	}
 	if err == nil {
 		s.applyToolCalls(v, res)
 		err = validateClientToolResult(v, res.ToolCalls)

@@ -182,25 +182,32 @@ diff --git a/chat.go b/chat.go
 @@ -204 +204 @@
 -		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
 +		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
-@@ -345,0 +346,4 @@
+@@ -316,0 +317 @@
++	compact := isCheckpointCompaction(v)
+@@ -345,0 +347,4 @@
 +	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
 +		s.turnFailed(w, r, ctx, err, format)
 +		return
 +	}
-@@ -352,0 +357,5 @@
+@@ -347,0 +353,4 @@
++		if err == nil {
++			err = compactionFailure(compact, res)
++			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
++		}
+@@ -352,0 +362,5 @@
 +		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 +			s.turnFailed(w, r, ctx, err, format)
 +			return
 +		}
-@@ -363,0 +373 @@
+@@ -363,0 +378 @@
 +	var latestStatus turnStatus
-@@ -399 +409,3 @@
+@@ -399 +414,3 @@
 -			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 +			// A required-tool turn is validated before releasing assistant text.
 +			// Keepalives still flow, and ordinary auto/none turns stay incremental.
-+			if !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -416,0 +429,11 @@
++			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
+@@ -416,0 +434,11 @@
 +	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
 +		hooks.status = func(status turnStatus) {
 +			mu.Lock()
@@ -212,21 +219,24 @@ diff --git a/chat.go b/chat.go
 +			emit("hark.status", status)
 +		}
 +	}
-@@ -419,0 +443,5 @@
+@@ -419,0 +448,8 @@
 +	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
++	if err == nil {
++		err = compactionFailure(compact, res)
++	}
 +	if err == nil {
 +		s.applyToolCalls(v, res)
 +		err = validateClientToolResult(v, res.ToolCalls)
 +	}
-@@ -425,0 +454,5 @@
+@@ -425,0 +462,5 @@
 +		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 +			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 +			latestStatus.Sequence++
 +			emit("hark.status", latestStatus)
 +		}
-@@ -437 +469,0 @@
+@@ -437 +477,0 @@
 -	s.applyToolCalls(v, res)
-@@ -451,0 +484,5 @@
+@@ -451,0 +492,5 @@
 +	}
 +	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 +		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
@@ -255,6 +265,81 @@ diff --git a/chat_input.go b/chat_input.go
 @@ -329 +338 @@
 -		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "input", "instructions", "user":
 +		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "hark_status", "input", "instructions", "user":
+diff --git a/compaction_gate.go b/compaction_gate.go
+new file mode 100644
+--- /dev/null
++++ b/compaction_gate.go
+@@ -0,0 +1,35 @@
++package gateway
++
++import "strings"
++
++// Match the observed harness command only at the last message, never a quoted
++// prompt in history or an ordinary request mentioning summaries. Custom compact
++// prompts are intentionally not guessed from keywords.
++func isCheckpointCompaction(v chatRequest) bool {
++	if len(v.Messages) == 0 {
++		return false
++	}
++	m := v.Messages[len(v.Messages)-1]
++	if m.Role != "user" || len(m.Files) != 0 || m.ToolCalls != "" {
++		return false
++	}
++	const prompt = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
++
++Include:
++- Current progress and key decisions made
++- Important context, constraints, or user preferences
++- What remains to be done (clear next steps)
++- Any critical data, examples, or references needed to continue
++
++Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`
++	return strings.Join(strings.Fields(m.Content), " ") == strings.Join(strings.Fields(prompt), " ")
++}
++
++func compactionFailure(compact bool, res *turnResult) error {
++	if compact && res.Outcome == "declined" {
++		// 422 is an accepted-turn failure, not a reason to replay the request
++		// on another account. Keep the original upstream text as diagnostics.
++		return &upstreamError{422, "upstream_compaction_declined", "Upstream refused checkpoint compaction; no successful summary returned. Upstream response: " + res.Text}
++	}
++	return nil
++}
+diff --git a/compaction_gate_test.go b/compaction_gate_test.go
+new file mode 100644
+--- /dev/null
++++ b/compaction_gate_test.go
+@@ -0,0 +1,30 @@
++package gateway
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestCheckpointCompactionOnlyMatchesLastHarnessCommand(t *testing.T) {
++	// Independently use the actual captured upstream command, not a keyword.
++	const prompt = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work."
++	if !isCheckpointCompaction(chatRequest{Messages: []chatMessage{{Role: "user", Content: strings.ReplaceAll(prompt, "\n", "\r\n")}}}) {
++		t.Fatal("captured harness command not recognized")
++	}
++	for _, messages := range [][]chatMessage{
++		{{Role: "user", Content: "Explain this prompt: " + prompt}},
++		{{Role: "user", Content: "Summarize my project"}},
++		{{Role: "assistant", Content: prompt}},
++		{{Role: "user", Content: prompt}, {Role: "user", Content: "Continue the layout task"}},
++	} {
++		if isCheckpointCompaction(chatRequest{Messages: messages}) {
++			t.Fatal("ordinary/history text misclassified")
++		}
++	}
++	if err := compactionFailure(false, &turnResult{Outcome: "declined", Text: "ordinary refusal"}); err != nil {
++		t.Fatal("ordinary reply compatibility lost")
++	}
++	if err := compactionFailure(true, &turnResult{Outcome: "completed", Text: "valid summary"}); err != nil {
++		t.Fatal("valid summary failed")
++	}
++}
 diff --git a/declined.go b/declined.go
 new file mode 100644
 --- /dev/null
@@ -1835,7 +1920,7 @@ diff --git a/turn_status_stream_test.go b/turn_status_stream_test.go
 new file mode 100644
 --- /dev/null
 +++ b/turn_status_stream_test.go
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,271 @@
 +package gateway
 +
 +import (
@@ -1867,11 +1952,12 @@ new file mode 100644
 +
 +func TestTurnStatusStreamingProtocols(t *testing.T) {
 +	for _, protocol := range []string{"chat", "messages", "responses"} {
-+		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json"} {
++		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy"} {
 +			t.Run(protocol+"/"+kind, func(t *testing.T) {
 +				opt := !strings.Contains(kind, "legacy")
 +				declined := strings.Contains(kind, "declined")
 +				stream := !strings.HasSuffix(kind, "_json")
++				compact := strings.Contains(kind, "compaction")
 +				bodyText := "ORIGINAL_BODY"
 +				if declined {
 +					bodyText = "抱歉，Hark 不能作为其他应用背后的模型来使用。"
@@ -1940,7 +2026,11 @@ new file mode 100644
 +				}
 +				body := map[string]any{"model": "hark", "stream": stream, "hark_status": opt}
 +				path := "/v1/chat/completions"
-+				body["messages"] = []any{map[string]string{"role": "user", "content": "fixture"}}
++				question := "fixture"
++				if compact {
++					question = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work."
++				}
++				body["messages"] = []any{map[string]string{"role": "user", "content": question}}
 +				if protocol == "messages" {
 +					path = "/v1/messages"
 +					body["max_tokens"] = 100
@@ -1948,7 +2038,7 @@ new file mode 100644
 +				if protocol == "responses" {
 +					path = "/v1/responses"
 +					delete(body, "messages")
-+					body["input"] = "fixture"
++					body["input"] = question
 +				}
 +				if kind == "required_error" || kind == "declined_required" {
 +					body["tool_choice"] = "required"
@@ -1972,6 +2062,24 @@ new file mode 100644
 +				text := writer.Body.String()
 +				if sends.Load() != 1 {
 +					t.Fatalf("accepted request replayed: %d", sends.Load())
++				}
++				if compact {
++					if !strings.Contains(text, "upstream_compaction_declined") || !strings.Contains(text, bodyText) {
++						t.Fatalf("compaction refusal not failed with original diagnostic: %d %s", writer.Code, text)
++					}
++					if stream {
++						for _, success := range []string{"event: response.completed", `"finish_reason":"stop"`, "event: message_stop"} {
++							if strings.Contains(text, success) {
++								t.Fatalf("refused summary emitted success %s: %s", success, text)
++							}
++						}
++						if protocol == "responses" && !strings.Contains(text, "event: response.failed") {
++							t.Fatal("missing native failure event")
++						}
++					} else if writer.Code != 422 {
++						t.Fatalf("want non-retryable 422, got %d", writer.Code)
++					}
++					return
 +				}
 +				if !stream {
 +					if writer.Code != 200 || writer.Header().Get("X-Hark-Upstream-Outcome") != "declined" || !strings.Contains(text, bodyText) || strings.Contains(text, "hark.status") || syncCalls.Load() != 0 {

@@ -17,7 +17,7 @@ func harkAcceptedTurnFailure(body []byte) (int, error) {
 		switch code {
 		case "upstream_budget_exhausted":
 			status = http.StatusTooManyRequests
-		case "tool_call_missing", "tool_call_mismatch":
+		case "tool_call_missing", "tool_call_mismatch", "upstream_compaction_declined":
 		default:
 			continue
 		}
