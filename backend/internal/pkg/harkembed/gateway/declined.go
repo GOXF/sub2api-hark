@@ -19,6 +19,7 @@ func recordedBackendRefusal(m harkMessage) bool {
 		return false
 	}
 	for _, prefix := range []string{
+		"抱歉，Hark 不支持作为其他应用背后的模型来使用。",
 		"抱歉，Hark 不能作为其他应用背后的模型来使用。",
 		"这条请求还是另一个应用打包好、交给它自己模型的完整请求，Hark 不支持充当那个模型；",
 	} {

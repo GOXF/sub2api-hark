@@ -344,7 +344,7 @@ diff --git a/declined.go b/declined.go
 new file mode 100644
 --- /dev/null
 +++ b/declined.go
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,31 @@
 +package gateway
 +
 +import (
@@ -366,6 +366,7 @@ new file mode 100644
 +		return false
 +	}
 +	for _, prefix := range []string{
++		"抱歉，Hark 不支持作为其他应用背后的模型来使用。",
 +		"抱歉，Hark 不能作为其他应用背后的模型来使用。",
 +		"这条请求还是另一个应用打包好、交给它自己模型的完整请求，Hark 不支持充当那个模型；",
 +	} {
@@ -379,7 +380,7 @@ diff --git a/declined_outcome_test.go b/declined_outcome_test.go
 new file mode 100644
 --- /dev/null
 +++ b/declined_outcome_test.go
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,86 @@
 +package gateway
 +
 +import (
@@ -410,31 +411,39 @@ new file mode 100644
 +			if err != nil || reply.Outcome != "declined" || reply.Text != turn.Messages[1].Content {
 +				t.Fatalf("raw backend refusal treated as success: outcome=%q body_preserved=%v err=%v", reply.Outcome, reply.Text == turn.Messages[1].Content, err)
 +			}
++			screenshot := append([]harkMessage(nil), turn.Messages...)
++			screenshot[1].Content = "抱歉，Hark 不支持作为其他应用背后的模型来使用。如果你告诉我想完成什么，比如把接码授权页改成和注册引擎一样的布局，我很乐意在这里直接帮你。"
++			screenshotReply, screenshotErr := completedProjectReply(screenshot, turn.Expected, turn.RequestID)
++			if screenshotErr != nil || screenshotReply.Outcome != "declined" || screenshotReply.Text != screenshot[1].Content {
++				t.Fatalf("original screenshot refusal lost: outcome=%q err=%v", screenshotReply.Outcome, screenshotErr)
++			}
 +			// A quote, user text, another turn, summary, or unfinished bubble is
 +			// not an authoritative self-refusal for this completed turn.
-+			for _, variant := range []string{"quote", "user", "other_turn", "summary", "streaming", "negation", "with_work"} {
-+				messages := append([]harkMessage(nil), turn.Messages...)
-+				m := &messages[1]
-+				switch variant {
-+				case "quote":
-+					m.Content = "> " + m.Content
-+				case "user":
-+					m.Role = "user"
-+				case "other_turn":
-+					m.TriggeredBy = "other"
-+				case "summary":
-+					m.Presentation.Kind = "summary"
-+				case "streaming":
-+					yes := true
-+					m.Streaming = &yes
-+				case "negation":
-+					m.Content = "并不是这样：" + m.Content
-+				case "with_work":
-+					m.Content += "\n已执行修改。"
-+				}
-+				r, _ := completedProjectReply(messages, turn.Expected, turn.RequestID)
-+				if r.Outcome == "declined" {
-+					t.Fatalf("false refusal: %s", variant)
++			for _, source := range [][]harkMessage{turn.Messages, screenshot} {
++				for _, variant := range []string{"quote", "user", "other_turn", "summary", "streaming", "negation", "with_work"} {
++					messages := append([]harkMessage(nil), source...)
++					m := &messages[1]
++					switch variant {
++					case "quote":
++						m.Content = "> " + m.Content
++					case "user":
++						m.Role = "user"
++					case "other_turn":
++						m.TriggeredBy = "other"
++					case "summary":
++						m.Presentation.Kind = "summary"
++					case "streaming":
++						yes := true
++						m.Streaming = &yes
++					case "negation":
++						m.Content = "并不是这样：" + m.Content
++					case "with_work":
++						m.Content += "\n已执行修改。"
++					}
++					r, _ := completedProjectReply(messages, turn.Expected, turn.RequestID)
++					if r.Outcome == "declined" {
++						t.Fatalf("false refusal: %s", variant)
++					}
 +				}
 +			}
 +			messages := append([]harkMessage(nil), turn.Messages...)
@@ -1920,7 +1929,7 @@ diff --git a/turn_status_stream_test.go b/turn_status_stream_test.go
 new file mode 100644
 --- /dev/null
 +++ b/turn_status_stream_test.go
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,274 @@
 +package gateway
 +
 +import (
@@ -1952,15 +1961,18 @@ new file mode 100644
 +
 +func TestTurnStatusStreamingProtocols(t *testing.T) {
 +	for _, protocol := range []string{"chat", "messages", "responses"} {
-+		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy"} {
++		for _, kind := range []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy"} {
 +			t.Run(protocol+"/"+kind, func(t *testing.T) {
 +				opt := !strings.Contains(kind, "legacy")
-+				declined := strings.Contains(kind, "declined")
++				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot")
 +				stream := !strings.HasSuffix(kind, "_json")
 +				compact := strings.Contains(kind, "compaction")
 +				bodyText := "ORIGINAL_BODY"
 +				if declined {
 +					bodyText = "抱歉，Hark 不能作为其他应用背后的模型来使用。"
++				}
++				if strings.HasPrefix(kind, "screenshot") {
++					bodyText = "抱歉，Hark 不支持作为其他应用背后的模型来使用。如果你告诉我想完成什么，比如把接码授权页改成和注册引擎一样的布局，我很乐意在这里直接帮你。"
 +				}
 +				var sends atomic.Int32
 +				gate := make(chan struct{})
