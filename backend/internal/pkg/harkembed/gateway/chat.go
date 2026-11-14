@@ -351,7 +351,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	if !v.Stream {
 		err := s.runTurn(ctx, r, v, res, turnHooks{})
 		if err == nil {
-			err = compactionFailure(compact, res)
+			err = declinedTurnFailure(compact, res)
 			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 		}
 		if err != nil {
@@ -447,7 +447,7 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	defer mu.Unlock()
 	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 	if err == nil {
-		err = compactionFailure(compact, res)
+		err = declinedTurnFailure(compact, res)
 	}
 	if err == nil {
 		s.applyToolCalls(v, res)

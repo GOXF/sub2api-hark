@@ -25,11 +25,17 @@ Be concise, structured, and focused on helping the next LLM seamlessly continue 
 	return strings.Join(strings.Fields(m.Content), " ") == strings.Join(strings.Fields(prompt), " ")
 }
 
-func compactionFailure(compact bool, res *turnResult) error {
-	if compact && res.Outcome == "declined" {
-		// 422 is an accepted-turn failure, not a reason to replay the request
-		// on another account. Keep the original upstream text as diagnostics.
-		return &upstreamError{422, "upstream_compaction_declined", "Upstream refused checkpoint compaction; no successful summary returned. Upstream response: " + res.Text}
+func declinedTurnFailure(compact bool, res *turnResult) error {
+	if res.Outcome != "declined" {
+		return nil
 	}
-	return nil
+	code := "upstream_declined"
+	message := "Upstream refused the request; no successful result returned. Upstream response: "
+	if compact {
+		code = "upstream_compaction_declined"
+		message = "Upstream refused checkpoint compaction; no successful summary returned. Upstream response: "
+	}
+	// 422 is an accepted-turn failure, not a reason to replay the request
+	// on another account. Keep the original upstream text as diagnostics.
+	return &upstreamError{422, code, message + res.Text}
 }

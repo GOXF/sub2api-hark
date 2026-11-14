@@ -29,7 +29,7 @@ func (w *statusTestRecorder) Write(b []byte) (int, error) {
 
 func TestTurnStatusStreamingProtocols(t *testing.T) {
 	for _, protocol := range []string{"chat", "messages", "responses"} {
-		kinds := []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy"}
+		kinds := []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy", "http_screenshot_declined", "http_screenshot_declined_json", "http_screenshot_declined_legacy", "ordinary_http", "ordinary_http_json", "ordinary_http_legacy", "image_screenshot_declined", "image_screenshot_declined_json", "image_screenshot_declined_legacy", "image_normal", "image_normal_json", "image_normal_legacy"}
 		observed := observedRefusalTurns(t)
 		for i := range observed {
 			for _, suffix := range []string{"declined", "declined_json", "compaction", "compaction_json", "compaction_legacy"} {
@@ -49,6 +49,12 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				if strings.HasPrefix(kind, "screenshot") {
 					bodyText = "抱歉，Hark 不支持作为其他应用背后的模型来使用。如果你告诉我想完成什么，比如把接码授权页改成和注册引擎一样的布局，我很乐意在这里直接帮你。"
 				}
+				if strings.HasPrefix(kind, "http_screenshot_") {
+					bodyText = "Hark 不能被用作其他应用背后的模型，不过如果你告诉我你想完成什么，我很乐意直接帮你。"
+				}
+				if strings.HasPrefix(kind, "ordinary_http") {
+					bodyText = "HTTP 是浏览器和服务器之间约定好的请求与响应规则，让网页、图片、数据等内容能在网络上被请求和传回来。"
+				}
 				observedIndex := -1
 				if strings.HasPrefix(kind, "observed_") {
 					if _, err := fmt.Sscanf(kind, "observed_%d", &observedIndex); err != nil {
@@ -56,6 +62,14 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 					}
 					bodyText = observedRefusalText(observed[observedIndex])
 				}
+				imageInput := strings.HasPrefix(kind, "image_")
+				if imageInput {
+					bodyText = "图片已收到，导出功能需要继续检查。"
+					if declined {
+						bodyText = "Hark 不能被当作其他应用背后的模型来调用。如果你直接告诉我想做成什么，比如“缺少导出 SUB2api-HARK”具体指什么，我很乐意在这里帮你。"
+					}
+				}
+				var uploads atomic.Int32
 				var sends atomic.Int32
 				gate := make(chan struct{})
 				var syncCalls atomic.Int32
@@ -66,6 +80,16 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 					switch r.URL.Path {
 					case "/api/conversations":
 						json.NewEncoder(w).Encode(map[string]string{"conversationId": "status-fixture"})
+					case "/api/files/upload/status-fixture/presign":
+						json.NewEncoder(w).Encode(map[string]any{"upload_url": "http://" + r.Host + "/fixture-upload", "attachment_id": "image-1", "s3_key": "image-key", "path": "image-path", "content_type": "image/png"})
+					case "/fixture-upload":
+						if r.Method != http.MethodPut || r.ContentLength <= 0 || r.Header.Get("Content-Type") != "image/png" {
+							t.Error("image upload metadata lost")
+						}
+						uploads.Add(1)
+						w.WriteHeader(http.StatusOK)
+					case "/api/files/status-fixture/image-1/finalize":
+						json.NewEncoder(w).Encode(map[string]any{})
 					case "/api/messages/send":
 						sends.Add(1)
 						var p map[string]json.RawMessage
@@ -127,6 +151,9 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				body := map[string]any{"model": "hark", "stream": stream, "hark_status": opt}
 				path := "/v1/chat/completions"
 				question := "fixture"
+				if strings.HasPrefix(kind, "http_screenshot_") || strings.HasPrefix(kind, "ordinary_http") {
+					question = "用一句话解释 HTTP 的作用"
+				}
 				if compact {
 					question = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work."
 				}
@@ -139,6 +166,20 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 					path = "/v1/responses"
 					delete(body, "messages")
 					body["input"] = question
+				}
+				if imageInput {
+					const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPwoAAAAASUVORK5CYII="
+					question = "缺少导出SUB2api-HARK"
+					parts := []any{map[string]any{"type": "text", "text": question}, map[string]any{"type": "image_url", "image_url": map[string]string{"url": "data:image/png;base64," + png}}}
+					if protocol == "responses" {
+						parts = []any{map[string]any{"type": "input_text", "text": question}, map[string]any{"type": "input_image", "image_url": "data:image/png;base64," + png}}
+						body["input"] = []any{map[string]any{"role": "user", "content": parts}}
+					} else {
+						if protocol == "messages" {
+							parts[1] = map[string]any{"type": "image", "source": map[string]string{"type": "base64", "media_type": "image/png", "data": png}}
+						}
+						body["messages"] = []any{map[string]any{"role": "user", "content": parts}}
+					}
 				}
 				if kind == "required_error" || kind == "declined_required" {
 					body["tool_choice"] = "required"
@@ -160,17 +201,24 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 				writer := &statusTestRecorder{ResponseRecorder: httptest.NewRecorder(), gate: gate}
 				server.EmbeddedHandler().ServeHTTP(writer, req)
 				text := writer.Body.String()
+				if imageInput && uploads.Load() != 1 {
+					t.Fatalf("image upload skipped or replayed: %d", uploads.Load())
+				}
 				if sends.Load() != 1 {
 					t.Fatalf("accepted request replayed: %d", sends.Load())
 				}
-				if compact {
-					if !strings.Contains(text, "upstream_compaction_declined") || !strings.Contains(text, bodyText) {
-						t.Fatalf("compaction refusal not failed with original diagnostic: %d %s", writer.Code, text)
+				if declined {
+					wantCode := "upstream_declined"
+					if compact {
+						wantCode = "upstream_compaction_declined"
+					}
+					if !strings.Contains(text, wantCode) || !strings.Contains(text, bodyText) {
+						t.Fatalf("refusal not failed with original diagnostic: %d %s", writer.Code, text)
 					}
 					if stream {
 						for _, success := range []string{"event: response.completed", `"finish_reason":"stop"`, "event: message_stop"} {
 							if strings.Contains(text, success) {
-								t.Fatalf("refused summary emitted success %s: %s", success, text)
+								t.Fatalf("refused request emitted success %s: %s", success, text)
 							}
 						}
 						if protocol == "responses" && !strings.Contains(text, "event: response.failed") {
@@ -179,26 +227,26 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 					} else if writer.Code != 422 {
 						t.Fatalf("want non-retryable 422, got %d", writer.Code)
 					}
+					if strings.Contains(text, "tool_call_missing") {
+						t.Fatal("upstream refusal replaced by a missing-tool failure")
+					}
+					if stream && opt {
+						var last turnStatus
+						readStatusSSE(strings.NewReader(text), func(b []byte) {
+							var status turnStatus
+							if json.Unmarshal(b, &status) == nil && status.Type == "hark.status" {
+								last = status
+							}
+						})
+						if last.Status != "ended" || last.Reason != "upstream_declined" || strings.Contains(text, `"reason":"stream_ended"`) {
+							t.Fatalf("refusal terminal status lost: %s", text)
+						}
+					}
 					return
 				}
 				if !stream {
-					if writer.Code != 200 || writer.Header().Get("X-Hark-Upstream-Outcome") != "declined" || !strings.Contains(text, bodyText) || strings.Contains(text, "hark.status") || syncCalls.Load() != 0 {
+					if writer.Code != 200 || writer.Header().Get("X-Hark-Upstream-Outcome") != "completed" || !strings.Contains(text, bodyText) || strings.Contains(text, "hark.status") || syncCalls.Load() != 0 {
 						t.Fatalf("nonstream body/outcome changed: %d %s", writer.Code, text)
-					}
-					return
-				}
-				if declined && writer.Result().Trailer.Get("X-Hark-Upstream-Outcome") != "declined" {
-					t.Fatal("declined outcome trailer missing")
-				}
-				if kind == "declined_required" {
-					if !strings.Contains(text, "tool_call_missing") || !strings.Contains(text, `"reason":"upstream_declined"`) || strings.Contains(text, bodyText) || strings.Contains(text, `"reason":"error"`) {
-						t.Fatalf("refusal masked tool contract: %s", text)
-					}
-					return
-				}
-				if declined && opt {
-					if !strings.Contains(text, bodyText) || !strings.Contains(text, `"status":"ended"`) || strings.Count(text, `"reason":"upstream_declined"`) != 1 || strings.Contains(text, `"reason":"stream_ended"`) {
-						t.Fatalf("refusal status lost or body replaced: %s", text)
 					}
 					return
 				}
