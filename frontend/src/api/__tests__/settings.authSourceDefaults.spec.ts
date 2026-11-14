@@ -12,7 +12,7 @@ import { listPlatformIds } from "@/constants/platformCatalog";
 
 /** 与后端 AllowedQuotaPlatforms 一致的全部具体平台（平台清单）。 */
 const quotaPlatforms = [
-  "anthropic", "openai", "gemini", "antigravity", "grok",
+  "anthropic", "openai", "hark", "gemini", "antigravity", "grok",
   "kimi", "zhipu", "deepseek", "minimax", "opencode_go", "typesafe", "command_code", "cline",
 ];
 
@@ -81,6 +81,18 @@ describe("admin settings auth source defaults helpers", () => {
     expect(state.linuxdo.grant_on_signup).toBe(false);
     expect(state.oidc.grant_on_signup).toBe(false);
     expect(state.wechat.grant_on_signup).toBe(false);
+  });
+
+  it("preserves Hark quotas across settings state and update payload", () => {
+    const harkQuotas = { daily: 5, weekly: 20, monthly: 80 };
+    const state = buildAuthSourceDefaultsState({
+      auth_source_default_email_platform_quotas: { hark: harkQuotas },
+    });
+    const payload: UpdateSettingsRequest = {};
+
+    expect(state.email.platform_quotas.hark).toEqual(harkQuotas);
+    appendAuthSourceDefaultsToUpdateRequest(payload, state);
+    expect(payload.auth_source_default_email_platform_quotas?.hark).toEqual(harkQuotas);
   });
 
   it("reads nested platform_quotas from settings into auth source state", () => {
