@@ -1,0 +1,58 @@
+{
+  "provenance": {
+    "source": "read-only GET of exact Hark conversation history after request; not original SSE capture",
+    "raw_history_sha256": "1634f349b078ca0c616f54124b4e69f2ed83e821ed7b5b24a0f82abbe8fd8dcb",
+    "redactions": [
+      "user content",
+      "user attachments",
+      "assistant agentId"
+    ],
+    "synthetic_upstream_fields": false
+  },
+  "request_id": "d6d976d7-72af-4a1d-b705-825edfb09c4a",
+  "expected": "374e808b-8998-4ec6-966b-561b950f4856",
+  "messages": [
+    {
+      "id": "d6d976d7-72af-4a1d-b705-825edfb09c4a",
+      "role": "user",
+      "content": "[user content and image metadata omitted for privacy]",
+      "timestamp": 1794651686939,
+      "source": "web"
+    },
+    {
+      "id": "374e808b-8998-4ec6-966b-561b950f4856",
+      "role": "assistant",
+      "content": "",
+      "timestamp": 1794651687047,
+      "triggeredByMessageId": "d6d976d7-72af-4a1d-b705-825edfb09c4a",
+      "isStreaming": false,
+      "source": "web",
+      "jobStatus": "completed"
+    },
+    {
+      "id": "0ea92660-1362-41b1-a769-19630e0977fd",
+      "role": "assistant",
+      "content": "Hark 不支持被当作其他应用背后的模型来用。你可以直接告诉我想解决什么问题，我很乐意帮你。",
+      "timestamp": 1794651698437,
+      "triggeredByMessageId": "d6d976d7-72af-4a1d-b705-825edfb09c4a",
+      "answersMessageIds": [
+        "d6d976d7-72af-4a1d-b705-825edfb09c4a"
+      ],
+      "isStreaming": false,
+      "source": "send_bubble",
+      "presentation": {
+        "kind": "text"
+      }
+    },
+    {
+      "id": "5313445b-1c9a-4fde-a102-b4d547a83312",
+      "role": "assistant",
+      "content": "",
+      "timestamp": 1794651698537,
+      "triggeredByMessageId": "d6d976d7-72af-4a1d-b705-825edfb09c4a",
+      "isStreaming": false,
+      "source": "web",
+      "jobStatus": "completed"
+    }
+  ]
+}

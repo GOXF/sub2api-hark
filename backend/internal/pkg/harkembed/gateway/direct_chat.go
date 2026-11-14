@@ -300,6 +300,18 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 		}
 	}
 	if primaryDone && !pending {
+		// A native, turn-bound refusal takes precedence over explanatory text.
+		// Keep both original parts; never replace a refusal with a success body.
+		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
+			found := false
+			for _, part := range parts {
+				found = found || part == notice
+			}
+			if !found {
+				parts = append(parts, notice)
+			}
+			return projectReply{Text: strings.Join(parts, "\n\n"), Outcome: "declined", Attachments: files}, nil
+		}
 		if len(parts) > 0 || len(files) > 0 {
 			// Plain-text refusals can accompany completed jobs. Only classify an
 			// otherwise empty result with one evidenced, turn-bound text bubble.
@@ -311,9 +323,6 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 				}
 			}
 			return projectReply{Text: strings.Join(parts, "\n\n"), Outcome: "completed", Attachments: files}, nil
-		}
-		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
-			return projectReply{Text: notice, Outcome: "declined"}, nil
 		}
 	}
 	return projectReply{}, nil

@@ -15,7 +15,7 @@ func TestOrdinaryScreenshotRefusalRecognition(t *testing.T) {
 	for _, text := range texts {
 		for _, variant := range []string{"exact", "quoted", "example", "code", "multiline", "same_line_work", "other_source", "streaming", "unknown_streaming"} {
 			t.Run(text+"/"+variant, func(t *testing.T) {
-				raw := map[string]any{"source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "isStreaming": false, "content": text}
+				raw := map[string]any{"role": "assistant", "source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "isStreaming": false, "content": text}
 				switch variant {
 				case "quoted":
 					raw["content"] = "“" + text + "”"
