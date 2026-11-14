@@ -21,7 +21,7 @@ import (
 func TestHarkToolContractFailureDoesNotRotateAccounts(t *testing.T) {
 	service := &OpenAIGatewayService{}
 	account := &Account{Platform: "hark"}
-	for _, code := range []string{"tool_call_missing", "tool_call_mismatch", "upstream_compaction_declined"} {
+	for _, code := range []string{"tool_call_missing", "tool_call_mismatch", "upstream_compaction_declined", "upstream_declined"} {
 		body := []byte(`{"error":{"code":"` + code + `","message":"Client tool execution has not started; continue explicitly"}}`)
 		if service.shouldFailoverOpenAIUpstreamResponse(account, http.StatusUnprocessableEntity, "", body) {
 			t.Fatalf("accepted tool contract failure rotated accounts: %s", code)
@@ -33,7 +33,7 @@ func TestHarkToolContractForwardingKeepsFailureAndDoesNotReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
 		for _, stream := range []bool{false, true} {
-			for _, code := range []string{"tool_call_missing", "tool_call_mismatch", "upstream_compaction_declined"} {
+			for _, code := range []string{"tool_call_missing", "tool_call_mismatch", "upstream_compaction_declined", "upstream_declined"} {
 				t.Run(fmt.Sprintf("%s/stream=%t/%s", path, stream, code), func(t *testing.T) {
 					body := []byte(fmt.Sprintf(`{"model":"fixture-model","stream":%t,"max_tokens":32,"messages":[{"role":"user","content":"Inspect fixture only"}]}`, stream))
 					if path == "/v1/responses" {

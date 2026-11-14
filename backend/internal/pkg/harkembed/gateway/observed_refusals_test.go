@@ -68,7 +68,7 @@ func TestObservedRefusalOutcomes(t *testing.T) {
 			if err != nil || reply.Outcome != "declined" || reply.Text != want {
 				t.Fatalf("outcome=%q body_preserved=%t err=%v", reply.Outcome, reply.Text == want, err)
 			}
-			if err := compactionFailure(true, &turnResult{Outcome: reply.Outcome, Text: reply.Text}); err == nil {
+			if err := declinedTurnFailure(true, &turnResult{Outcome: reply.Outcome, Text: reply.Text}); err == nil {
 				t.Fatal("refusal accepted as checkpoint summary")
 			}
 			for _, variant := range []string{"quote", "quoted", "code", "user", "other_turn", "summary", "streaming", "unknown_streaming", "wrong_source", "negation", "with_work", "same_line_work", "ordinary"} {

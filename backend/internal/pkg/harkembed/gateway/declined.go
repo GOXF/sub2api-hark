@@ -15,7 +15,7 @@ func recordedBackendRefusal(m harkMessage) bool {
 		return false
 	}
 	text := strings.TrimSpace(m.Content)
-	if utf8.RuneCountInString(text) > 512 || strings.ContainsAny(text, "\r\n`\"“”") {
+	if utf8.RuneCountInString(text) > 512 || strings.ContainsAny(text, "\r\n`") {
 		return false
 	}
 	// Observed production bubbles use several other wordings. Match their
@@ -27,8 +27,15 @@ func recordedBackendRefusal(m harkMessage) bool {
 		"Hark 不能被当作其他应用背后的模型来调用。如果你告诉我你实际想完成什么，我很乐意直接在这里帮你。",
 		"Hark 不能作为其他应用背后的模型来使用。如果你告诉我你想做成什么，我很乐意直接帮你。",
 		"Hark 不支持作为其他应用背后的模型来使用。如果你告诉我你想完成什么，我很乐意直接在这里帮你。",
-		"Hark 不能用作其他应用背后的模型。不过如果你告诉我你想完成什么，我很乐意直接在这里帮你。":
+		"Hark 不能用作其他应用背后的模型。不过如果你告诉我你想完成什么，我很乐意直接在这里帮你。",
+		"Hark 不能被用作其他应用背后的模型，不过如果你告诉我你想完成什么，我很乐意直接帮你。",
+		"Hark 不能被当作其他应用背后的模型来调用。如果你直接告诉我想做成什么，比如“缺少导出 SUB2api-HARK”具体指什么，我很乐意在这里帮你。":
 		return true
+	}
+	// A recorded full-text refusal may quote the user's task. Do not loosen
+	// the prefix rules for arbitrary quotations or quoted refusal examples.
+	if strings.ContainsAny(text, "\"“”") {
+		return false
 	}
 	for _, prefix := range []string{
 		"抱歉，Hark 不支持作为其他应用背后的模型来使用。",

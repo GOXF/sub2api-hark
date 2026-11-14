@@ -21,10 +21,10 @@ func TestCheckpointCompactionOnlyMatchesLastHarnessCommand(t *testing.T) {
 			t.Fatal("ordinary/history text misclassified")
 		}
 	}
-	if err := compactionFailure(false, &turnResult{Outcome: "declined", Text: "ordinary refusal"}); err != nil {
-		t.Fatal("ordinary reply compatibility lost")
+	if err := declinedTurnFailure(false, &turnResult{Outcome: "declined", Text: "ordinary refusal"}); err == nil {
+		t.Fatal("ordinary refusal accepted as success")
 	}
-	if err := compactionFailure(true, &turnResult{Outcome: "completed", Text: "valid summary"}); err != nil {
+	if err := declinedTurnFailure(true, &turnResult{Outcome: "completed", Text: "valid summary"}); err != nil {
 		t.Fatal("valid summary failed")
 	}
 }
