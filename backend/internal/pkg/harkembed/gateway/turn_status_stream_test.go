@@ -29,7 +29,7 @@ func (w *statusTestRecorder) Write(b []byte) (int, error) {
 
 func TestTurnStatusStreamingProtocols(t *testing.T) {
 	for _, protocol := range []string{"chat", "messages", "responses"} {
-		kinds := []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy", "http_screenshot_declined", "http_screenshot_declined_json", "http_screenshot_declined_legacy", "ordinary_http", "ordinary_http_json", "ordinary_http_legacy", "image_screenshot_declined", "image_screenshot_declined_json", "image_screenshot_declined_legacy", "image_normal", "image_normal_json", "image_normal_legacy"}
+		kinds := []string{"ended", "waiting", "legacy", "required_error", "declined", "declined_waiting", "declined_no_sync", "declined_required", "declined_legacy", "native_declined", "native_declined_no_sync", "declined_json", "native_declined_json", "declined_compaction", "declined_compaction_json", "native_declined_compaction", "native_declined_compaction_json", "declined_compaction_legacy", "screenshot_compaction", "screenshot_compaction_json", "screenshot_compaction_legacy", "http_screenshot_declined", "http_screenshot_declined_json", "http_screenshot_declined_legacy", "ordinary_http", "ordinary_http_json", "ordinary_http_legacy", "image_screenshot_declined", "image_screenshot_declined_json", "image_screenshot_declined_legacy", "image_normal", "image_normal_json", "image_normal_legacy", "latest_declined", "latest_declined_json", "latest_declined_legacy", "latest_compaction", "latest_compaction_json", "image_latest_declined", "image_latest_declined_json", "image_latest_declined_legacy", "native_text_declined", "native_text_declined_json"}
 		observed := observedRefusalTurns(t)
 		for i := range observed {
 			for _, suffix := range []string{"declined", "declined_json", "compaction", "compaction_json", "compaction_legacy"} {
@@ -39,7 +39,7 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 		for _, kind := range kinds {
 			t.Run(protocol+"/"+kind, func(t *testing.T) {
 				opt := !strings.Contains(kind, "legacy")
-				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot") || strings.HasPrefix(kind, "observed_")
+				declined := strings.Contains(kind, "declined") || strings.HasPrefix(kind, "screenshot") || strings.HasPrefix(kind, "observed_") || strings.HasPrefix(kind, "latest_")
 				stream := !strings.HasSuffix(kind, "_json")
 				compact := strings.Contains(kind, "compaction")
 				bodyText := "ORIGINAL_BODY"
@@ -68,6 +68,11 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 					if declined {
 						bodyText = "Hark 不能被当作其他应用背后的模型来调用。如果你直接告诉我想做成什么，比如“缺少导出 SUB2api-HARK”具体指什么，我很乐意在这里帮你。"
 					}
+				}
+				latest := latestRefusalTurn(t)
+				latestCase := strings.HasPrefix(kind, "latest_") || strings.HasPrefix(kind, "image_latest_")
+				if latestCase {
+					bodyText = observedRefusalText(latest)
 				}
 				var uploads atomic.Int32
 				var sends atomic.Int32
@@ -131,6 +136,15 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 						messages := []any{map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false, "content": bodyText, "source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "inputNeeded": strings.Contains(kind, "waiting")}}
 						if strings.HasPrefix(kind, "native_") {
 							messages = []any{map[string]any{"id": u, "role": "user"}, map[string]any{"id": a, "role": "assistant", "triggeredByMessageId": u, "jobStatus": "completed", "isStreaming": false}, map[string]any{"id": "notice", "role": "assistant", "source": "declined_notice", "presentation": map[string]string{"kind": "declined"}, "isStreaming": false, "content": bodyText}}
+						}
+						if strings.HasPrefix(kind, "native_text_") {
+							messages[1].(map[string]any)["content"] = "任务未执行；保留此说明。"
+						}
+						if latestCase {
+							messages = nil
+							for _, m := range observedRefusalMessages(latest, u, a) {
+								messages = append(messages, m)
+							}
 						}
 						if observedIndex >= 0 {
 							messages = nil
@@ -226,6 +240,9 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 						}
 					} else if writer.Code != 422 {
 						t.Fatalf("want non-retryable 422, got %d", writer.Code)
+					}
+					if strings.HasPrefix(kind, "native_text_") && !strings.Contains(text, "任务未执行；保留此说明。") {
+						t.Fatal("native refusal replaced accompanying original text")
 					}
 					if strings.Contains(text, "tool_call_missing") {
 						t.Fatal("upstream refusal replaced by a missing-tool failure")
