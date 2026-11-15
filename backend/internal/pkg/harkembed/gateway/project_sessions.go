@@ -30,10 +30,41 @@ type projectSession struct {
 	Turns          int       `json:"turns,omitempty"`
 	// Version 2 keeps the old sent/systems reader compatible with rollback,
 	// while the new planner uses the unmodified client-history fingerprints.
-	LabelHistoryVersion int      `json:"label_history_version,omitempty"`
-	ClientSent          []string `json:"client_sent,omitempty"`
-	ClientSystems       []string `json:"client_systems,omitempty"`
-	Busy                bool     `json:"-"`
+	LabelHistoryVersion int                 `json:"label_history_version,omitempty"`
+	ClientSent          []string            `json:"client_sent,omitempty"`
+	ClientSystems       []string            `json:"client_systems,omitempty"`
+	PendingTurn         *pendingProjectTurn `json:"pending_turn,omitempty"`
+	Busy                bool                `json:"-"`
+}
+
+type pendingProjectTurn struct {
+	Expected  string `json:"expected"`
+	RequestID string `json:"request_id"`
+}
+
+func unsubmittedProject(p *projectSession) bool {
+	return p != nil && p.Turns == 0 && p.LabelHistoryVersion == 0 && p.PendingTurn == nil &&
+		len(p.Sent) == 0 && len(p.Systems) == 0 && len(p.ClientSent) == 0 && len(p.ClientSystems) == 0
+}
+
+// An empty failed-attempt Project must not accept a replay of another
+// account's already accepted session. Do not migrate or overwrite that owner.
+func (s *Server) otherAcceptedProject(r *http.Request, p *projectSession, sessionID string) bool {
+	if _, ok := embeddedAccount(r.Context()); !ok || sessionID == "" || !unsubmittedProject(p) {
+		return false
+	}
+	s.projectMu.Lock()
+	defer s.projectMu.Unlock()
+	for _, old := range s.projects {
+		if old == p || old.Archived || old.ConversationID == "" || old.Turns == 0 || old.AccountID == "" {
+			continue
+		}
+		key := sha256.Sum256([]byte("embed:" + old.AccountID + "\x00" + sessionID))
+		if old.MappingID == hex.EncodeToString(key[:]) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateSession(v chatRequest) error {
@@ -225,7 +256,7 @@ func systemHashes(messages []chatMessage, prev []string) []string {
 //   - full history that diverges (edited/regenerated history) → new Project.
 func planTurn(p *projectSession, messages []chatMessage) turnPlan {
 	all := hashes(messages)
-	if p == nil || p.ConversationID == "" {
+	if p == nil || p.ConversationID == "" || unsubmittedProject(p) {
 		return turnPlan{send: messages, mode: "new", sent: all, systems: systemHashes(messages, nil)}
 	}
 	n := len(p.Sent)

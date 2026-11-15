@@ -443,7 +443,8 @@ func (s *Server) createProjectDirect(ctx context.Context, cookie, zone string) (
 
 type turnHooks struct {
 	// accepted runs once Hark confirmed the message; streaming starts here.
-	accepted func()
+	accepted     func()
+	acceptedTurn func(expected, requestID string)
 	// poll runs after every history read with the visible text so far.
 	poll   func(partial string)
 	status func(turnStatus)
@@ -467,6 +468,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 	}
 	if accepted.ConversationID != cid || accepted.MessageID != requestID || accepted.Redirected == nil || *accepted.Redirected {
 		return projectReply{}, &upstreamError{502, "upstream_project_mismatch", "Hark 未确认消息进入本次独立 Project；未自动重发"}
+	}
+	if hooks.acceptedTurn != nil {
+		hooks.acceptedTurn(expected, requestID)
 	}
 	if hooks.accepted != nil {
 		hooks.accepted()
