@@ -144,7 +144,7 @@ func (f *scopeFixture) submit(t *testing.T, protocol string, messages []map[stri
 			t.Fatal(err)
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +286,7 @@ func TestRequestScopeCompactionOmitsExecutionTools(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			data, err := io.ReadAll(resp.Body)
 			if err != nil || resp.StatusCode != http.StatusOK {
 				t.Fatalf("compaction: status=%d err=%v body=%s", resp.StatusCode, err, data)
@@ -332,7 +332,7 @@ func TestRequestScopeCompactionConflictingToolChoice(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer resp.Body.Close()
+				defer func() { _ = resp.Body.Close() }()
 				data, err := io.ReadAll(resp.Body)
 				if err != nil || resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(data), "compaction_tool_choice_conflict") {
 					t.Fatalf("required tools silently discarded: status=%d err=%v body=%s", resp.StatusCode, err, data)
@@ -367,7 +367,7 @@ func TestRequestScopeCompactionForwardExtra(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d err=%v body=%s", resp.StatusCode, err, data)
@@ -402,7 +402,7 @@ func TestRequestScopeUnknownLegacyTemplatePreservesProject(t *testing.T) {
 			req = req.WithContext(gateway.WithEmbeddedAccount(req.Context(), gateway.SourceAccount{ID: "sub2api-42", Cookie: "fixture-cookie"}))
 			oldResponse := serve(f.server.EmbeddedHandler(), req)
 			_, err := io.Copy(io.Discard, oldResponse.Body)
-			oldResponse.Body.Close()
+			_ = oldResponse.Body.Close()
 			if err != nil || oldResponse.StatusCode != http.StatusOK {
 				t.Fatalf("legacy bootstrap: status=%d err=%v", oldResponse.StatusCode, err)
 			}

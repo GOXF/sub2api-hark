@@ -148,7 +148,7 @@ func testIdentityUpstreamGeneration(t *testing.T, mode string) {
 						t.Fatalf("upstream submissions=%d; want=1 (no gateway identity shortcut)", submissions)
 					}
 					wants := []string{"Keep original ACP context.", "Prior checkpoint A", "read_file", question}
-					if mode != "internals" && mode != "developer" && !(mode == "examples" && mixed) {
+					if mode != "internals" && mode != "developer" && (mode != "examples" || !mixed) {
 						wants = append(wants, modelLabelNote("", model))
 					} else if strings.Contains(sent["message"], "[模型标识 / Model identity]") {
 						t.Error("underlying-provider/developer question received public-name instructions")
