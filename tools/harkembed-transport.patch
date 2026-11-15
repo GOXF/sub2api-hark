@@ -1039,6 +1039,629 @@ index bde38c0..a292d77 100644
 -	t := http.DefaultTransport.(*http.Transport).Clone()
 -	t.Proxy = nil
 +	t := browserTransport(nil)
+diff --git a/recovery_preview.go b/recovery_preview.go
+new file mode 100644
+index 0000000..3416d12
+--- /dev/null
++++ b/recovery_preview.go
+@@ -0,0 +1,190 @@
++package gateway
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"slices"
++	"strings"
++)
++
++// recoveryPreviewProof must be supplied by a trusted in-process test host,
++// using a previously captured client request and an explicitly reviewed native
++// result. It is not a network header, API-key scope, or acknowledgment token.
++type recoveryPreviewProof struct {
++	AccountID         string `json:"account_id"`
++	SessionID         string `json:"session_id"`
++	ProjectID         string `json:"project_id"`
++	RequestID         string `json:"request_id"`
++	ResponseMessageID string `json:"response_message_id"`
++	Path              string `json:"path"`
++	RequestSHA256     string `json:"request_sha256"`
++	ResultSHA256      string `json:"result_sha256"`
++}
++
++// RecoveryPreviewHandler is an isolated feasibility seam. Deliberately NOT
++// registered in Handler, EmbeddedHandler or the sub2api admin/model routes.
++// It only renders a reviewed saved result into an existing client wire format;
++// it never clears pending, installs context, submits a turn or executes a tool.
++// A real host arm/ownership/acknowledgment protocol remains out of scope.
++func (s *Server) RecoveryPreviewHandler(raw json.RawMessage) http.Handler {
++	var proof recoveryPreviewProof
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	err := decoder.Decode(&proof)
++	valid := err == nil && decoder.Decode(&struct{}{}) == io.EOF &&
++		validResultID(proof.AccountID) && validResultID(proof.SessionID) &&
++		validResultID(proof.ProjectID) &&
++		validResultID(proof.RequestID) && validResultID(proof.ResponseMessageID) &&
++		validPreviewSHA(proof.RequestSHA256) && validPreviewSHA(proof.ResultSHA256) &&
++		slices.Contains([]string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}, proof.Path)
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Cache-Control", "no-store")
++		w.Header().Set("X-Content-Type-Options", "nosniff")
++		a, ok := embeddedAccount(r.Context())
++		if !ok || s.embed == nil || a.ID != proof.AccountID {
++			fail(w, 403, "recovery_preview_owner_mismatch", "预演需要明确绑定原账号；未换号或重发")
++			return
++		}
++		if !valid || r.Method != http.MethodPost || r.URL.Path != proof.Path || r.URL.RawQuery != "" {
++			fail(w, 400, "recovery_preview_invalid_proof", "预演凭据或协议入口不匹配")
++			return
++		}
++		body, readErr := io.ReadAll(io.LimitReader(r.Body, s.maxChatBody()+1))
++		if readErr != nil || int64(len(body)) > s.maxChatBody() || previewDigest(body) != proof.RequestSHA256 {
++			fail(w, 409, "recovery_preview_request_mismatch", "客户端原请求或工具协议已变化；未安装结果")
++			return
++		}
++		var v chatRequest
++		var format outputFormat
++		var parseErr error
++		switch proof.Path {
++		case "/v1/responses":
++			v, parseErr = s.normalizeResponses(body)
++			format = newResponsesFormat()
++		case "/v1/messages":
++			var model string
++			v, model, parseErr = s.normalizeMessages(body)
++			format = newAnthropicFormat(model)
++		default:
++			v, parseErr = s.normalizeChat(body)
++			format = newChatFormat()
++		}
++		if parseErr == nil {
++			parseErr = applySessionHeaders(r, &v)
++		}
++		if parseErr != nil || v.SessionID != proof.SessionID || v.SessionEnd || v.Bridge || isCheckpointCompaction(v) || s.forwardExtra {
++			fail(w, 409, "recovery_preview_context_mismatch", "预演只接受原会话的原执行协议，不接受归档、摘要或额外转发")
++			return
++		}
++		if toolErr := validateClientToolRequest(v, false); toolErr != nil {
++			status, code, message := turnError(r.Context(), toolErr)
++			fail(w, status, code, message)
++			return
++		}
++		// The exact client request digest covers tools and their schemas; saved
++		// client fingerprints independently bind its history to this Project.
++		s.projectMu.Lock()
++		p := s.projects[projectMapping(r, proof.SessionID)]
++		historyMatches := false
++		if p != nil && p.AccountID == proof.AccountID && p.ConversationID == proof.ProjectID {
++			sent := p.Sent
++			if p.LabelHistoryVersion == 2 {
++				sent = p.ClientSent
++			}
++			historyMatches = len(sent) > 0 && slices.Equal(sent, hashes(v.Messages))
++		}
++		s.projectMu.Unlock()
++		if !historyMatches {
++			fail(w, 409, "recovery_preview_history_mismatch", "原客户端历史无法与已受理游标精确对应；未修改 Project")
++			return
++		}
++		lookup := r.Clone(r.Context())
++		lookup.Method = http.MethodGet
++		u := *r.URL
++		lookup.URL = &u
++		lookup.SetPathValue("id", proof.SessionID)
++		lookup.URL.RawQuery = url.Values{"request_id": {proof.RequestID}, "response_message_id": {proof.ResponseMessageID}}.Encode()
++		result, resultErr := s.readSessionResult(lookup, proof.ProjectID)
++		if resultErr != nil {
++			status, code, message := turnError(r.Context(), resultErr)
++			fail(w, status, code, message)
++			return
++		}
++		res := &turnResult{Reused: true, Mode: "recovery-preview", Isolation: "key-session", Text: result.Result.Text, Outcome: "completed"}
++		if result.Status == "declined" {
++			res.Outcome = "declined"
++			status, code, message := turnError(r.Context(), declinedTurnFailure(false, res))
++			fail(w, status, code, message)
++			return
++		}
++		if result.Status == "failed" {
++			status := http.StatusBadGateway
++			if result.ErrorCode == "upstream_budget_exhausted" {
++				status = http.StatusTooManyRequests
++			}
++			fail(w, status, result.ErrorCode, result.ErrorMessage)
++			return
++		}
++		if result.Status != "completed" && result.Status != "awaiting_client_tool" || len(result.Result.Attachments) > 0 {
++			fail(w, 409, "recovery_preview_not_ready", "原结果未完整完成或包含未验收附件；未应用续接")
++			return
++		}
++		if previewDigest([]byte(res.Text)) != proof.ResultSHA256 {
++			fail(w, 409, "recovery_preview_result_mismatch", "上游结果与明确审阅的原文不同；未输出工具调用")
++			return
++		}
++		s.applyToolCalls(v, res)
++		if strings.Contains(res.Text, "<tool_call") {
++			fail(w, 422, "recovery_preview_tool_mismatch", "原工具调用不能被当前工具协议完整解析；未执行")
++			return
++		}
++		if toolErr := validateClientToolResult(v, res.ToolCalls); toolErr != nil {
++			status, code, message := turnError(r.Context(), toolErr)
++			fail(w, status, code, message)
++			return
++		}
++		for i := range res.ToolCalls {
++			call := &res.ToolCalls[i]
++			call.ID = "call_" + previewDigest([]byte(proof.AccountID + "\x00" + proof.SessionID + "\x00" + proof.ResponseMessageID + "\x00" + proof.RequestSHA256 + fmt.Sprintf("\x00%d", i)))[:24]
++		}
++		setTurnHeaders(w, res)
++		w.Header().Set("X-Hark-Recovery-Preview", "true")
++		w.Header().Set("X-Hark-Continuation-Applied", "false")
++		if !v.Stream {
++			write(w, 200, format.json(res))
++			return
++		}
++		w.Header().Set("Content-Type", "text/event-stream")
++		w.WriteHeader(http.StatusOK)
++		emit := func(event string, value any) {
++			b, _ := json.Marshal(value)
++			if event != "" {
++				_, _ = fmt.Fprintf(w, "event: %s\n", event)
++			}
++			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
++		}
++		format.start(emit)
++		if res.Text != "" {
++			format.delta(emit, res.Text)
++		}
++		format.finish(emit, res.Text, res.ToolCalls)
++		if format.done() {
++			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
++		}
++		if f, ok := w.(http.Flusher); ok {
++			f.Flush()
++		}
++	})
++}
++
++func previewDigest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
++func validPreviewSHA(value string) bool {
++	b, err := hex.DecodeString(value)
++	return err == nil && len(b) == sha256.Size && strings.ToLower(value) == value
++}
+diff --git a/recovery_preview_codex_test.go b/recovery_preview_codex_test.go
+new file mode 100644
+index 0000000..fca399e
+--- /dev/null
++++ b/recovery_preview_codex_test.go
+@@ -0,0 +1,148 @@
++package gateway
++
++import (
++	"bytes"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++// This optional test hosts a loopback-only preview for an installed, unmodified
++// Codex app-server. The Python driver supplies a fresh isolated CODEX_HOME and
++// returns constant output for fixture_probe; no shell/file tool is executed.
++// It seeds SYNTHETIC accepted metadata from the first request, not real history.
++func TestRecoveryPreviewCodexLoopback(t *testing.T) {
++	evidence := os.Getenv("HARK_CODEX_PREVIEW_DIR")
++	if evidence == "" {
++		t.Skip("explicit isolated Codex driver required")
++	}
++	if err := os.MkdirAll(evidence, 0700); err != nil {
++		t.Fatal(err)
++	}
++	s, dir, _, _, _, gets, writes := previewFixture(t, "responses", true, previewToolText)
++	var mu sync.Mutex
++	var preview http.Handler
++	var recoveredCallID string
++	var before []byte
++	var records []map[string]any
++	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		mu.Lock()
++		defer mu.Unlock()
++		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
++			http.Error(w, "fixture accepts Responses POST only", 404)
++			return
++		}
++		b, err := io.ReadAll(io.LimitReader(r.Body, s.maxChatBody()+1))
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		_ = r.Body.Close()
++		r.Body = io.NopCloser(bytes.NewReader(b))
++		// The experiment's explicit fixture binding, not a client modification.
++		r.Header.Set("X-Hark-Session-Id", "original-session")
++		r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: "sub2api-50", Cookie: "original-cookie"}))
++		if preview == nil {
++			v, err := s.normalizeResponses(b)
++			if err != nil {
++				t.Errorf("Codex request not accepted: %v", err)
++				http.Error(w, "invalid fixture request", 400)
++				return
++			}
++			toolSeen := false
++			for _, tool := range v.Tools {
++				toolSeen = toolSeen || tool.Name == "fixture_probe"
++			}
++			if !toolSeen {
++				t.Error("Codex did not advertise dynamic fixture_probe")
++				http.Error(w, "missing mock tool", 400)
++				return
++			}
++			for _, p := range s.projects {
++				p.ClientSent = hashes(v.Messages)
++				p.ClientSystems = systemHashes(v.Messages, nil)
++			}
++			if err := s.persistProjects(); err != nil {
++				t.Error(err)
++				return
++			}
++			before, err = os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++			if err != nil {
++				t.Error(err)
++				return
++			}
++			proof := map[string]any{"account_id": "sub2api-50", "session_id": "original-session", "project_id": "original-project", "request_id": "native-user", "response_message_id": "native-job", "path": "/v1/responses", "request_sha256": previewSHA(b), "result_sha256": previewSHA([]byte(previewToolText))}
++			preview = previewHandler(t, s, proof)
++			if err := os.WriteFile(filepath.Join(evidence, "captured-client-request.private.json"), b, 0600); err != nil {
++				t.Error(err)
++				return
++			}
++		}
++		rec := httptest.NewRecorder()
++		preview.ServeHTTP(rec, r)
++		if len(records) == 0 {
++			ids := regexp.MustCompile(`call_[a-f0-9]+`).FindAllString(rec.Body.String(), -1)
++			if len(ids) == 0 {
++				t.Error("preview response missing stable call ID")
++			} else {
++				recoveredCallID = ids[0]
++			}
++		} else {
++			v, err := s.normalizeResponses(b)
++			outputBound := false
++			if err == nil {
++				for _, m := range v.Messages {
++					outputBound = outputBound || m.Role == "tool" && strings.Contains(m.Content, "[call_id="+recoveredCallID+"]") && strings.Contains(m.Content, "MOCK_RESULT fixture-only")
++				}
++			}
++			if !outputBound {
++				t.Error("unmodified client did not echo mock result with recovered call ID")
++			}
++		}
++		records = append(records, map[string]any{"body_sha256": previewSHA(b), "request_bytes": len(b), "status": rec.Code, "response_sha256": previewSHA(rec.Body.Bytes())})
++		for k, values := range rec.Header() {
++			for _, v := range values {
++				w.Header().Add(k, v)
++			}
++		}
++		w.WriteHeader(rec.Code)
++		_, _ = w.Write(rec.Body.Bytes())
++	}))
++	defer loopback.Close()
++	if err := os.WriteFile(filepath.Join(evidence, "server-url.txt"), []byte(loopback.URL), 0600); err != nil {
++		t.Fatal(err)
++	}
++	deadline := time.Now().Add(100 * time.Second)
++	for time.Now().Before(deadline) {
++		if _, err := os.Stat(filepath.Join(evidence, "driver-finished.json")); err == nil {
++			break
++		}
++		time.Sleep(100 * time.Millisecond)
++	}
++	if _, err := os.Stat(filepath.Join(evidence, "driver-finished.json")); err != nil {
++		t.Fatal("isolated Codex driver did not finish")
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	after, _ := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++	if len(before) == 0 || !bytes.Equal(before, after) || *gets != 1 || *writes != 0 {
++		t.Fatalf("unsafe Codex preview: GETs=%d writes=%d records=%v", *gets, *writes, records)
++	}
++	if len(records) < 2 || records[0]["status"] != 200 || records[1]["status"] != 409 {
++		t.Fatalf("expected recovered tool delivery then explicit continuation guard: %v", records)
++	}
++	result := map[string]any{"client": "installed unmodified Codex app-server", "synthetic_fixture_only": true, "requests": records, "original_GETs": *gets, "upstream_writes": *writes, "pending_and_context_unchanged": true, "continuation_acknowledged": false, "real_shell_or_file_tools_executed": false, "scope": "wire parsing + dynamic mock-tool round trip only; second request deliberately blocked, not a completed resumed task"}
++	raw, _ := json.MarshalIndent(result, "", "  ")
++	if err := os.WriteFile(filepath.Join(evidence, "GATEWAY_RESULT.json"), raw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	t.Log("CODEX_PREVIEW accepted_mock_tool=true next_request=409 original_GETs=1 writes=0 pending_preserved=true")
++}
+diff --git a/recovery_preview_test.go b/recovery_preview_test.go
+new file mode 100644
+index 0000000..6c32cdd
+--- /dev/null
++++ b/recovery_preview_test.go
+@@ -0,0 +1,267 @@
++package gateway
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++)
++
++const previewToolText = `<tool_call>{"name":"fixture_probe","arguments":{"id":"fixture-only"}}</tool_call>`
++
++// The interface keeps the exact same behavioral harness runnable against the
++// released baseline, where preview is deliberately unavailable.
++func previewHandler(t *testing.T, s *Server, proof map[string]any) http.Handler {
++	t.Helper()
++	provider, ok := any(s).(interface {
++		RecoveryPreviewHandler(json.RawMessage) http.Handler
++	})
++	if !ok {
++		t.Fatal("RECOVERY_PREVIEW unavailable: released gateway only has diagnostic JSON, not model wire replay")
++	}
++	b, err := json.Marshal(proof)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return provider.RecoveryPreviewHandler(b)
++}
++
++func previewRequest(protocol string, stream bool) (string, string) {
++	switch protocol {
++	case "chat":
++		return "/v1/chat/completions", fmt.Sprintf(`{"model":"hark","session_id":"original-session","stream":%t,"messages":[{"role":"user","content":"Inspect mock fixture only"}],"tools":[{"type":"function","function":{"name":"fixture_probe","parameters":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}],"tool_choice":"required"}`, stream)
++	case "messages":
++		return "/v1/messages", fmt.Sprintf(`{"model":"hark","session_id":"original-session","stream":%t,"max_tokens":256,"messages":[{"role":"user","content":"Inspect mock fixture only"}],"tools":[{"name":"fixture_probe","input_schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}],"tool_choice":{"type":"any"}}`, stream)
++	default:
++		return "/v1/responses", fmt.Sprintf(`{"model":"hark","session_id":"original-session","stream":%t,"input":[{"role":"user","content":"Inspect mock fixture only"}],"tools":[{"type":"function","name":"fixture_probe","parameters":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}],"tool_choice":"required"}`, stream)
++	}
++}
++
++func previewSHA(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
++
++func previewFixture(t *testing.T, protocol string, stream bool, text string) (*Server, string, string, string, map[string]any, *int, *int) {
++	t.Helper()
++	gets, writes := 0, 0
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet {
++			writes++
++			w.WriteHeader(500)
++			t.Error("recovery preview submitted an upstream operation")
++			return
++		}
++		gets++
++		if r.URL.Path != "/api/messages/history" || r.URL.Query().Get("conversationId") != "original-project" || r.Header.Get("Cookie") != "original-cookie" {
++			t.Error("preview read another account/Project")
++		}
++		status := "completed"
++		if text == "processing-fixture" {
++			status = "running"
++		}
++		if text == "cost-capped-fixture" {
++			status = "cost_capped"
++		}
++		messages := []any{
++			map[string]string{"id": "native-user", "role": "user"},
++			map[string]any{"id": "native-job", "role": "assistant", "triggeredByMessageId": "native-user", "status": status, "content": text},
++		}
++		if text == "Hark 不能充当其他应用背后的模型。" {
++			messages = append(messages, map[string]any{"id": "native-declined", "role": "assistant", "source": "declined_notice", "presentation": map[string]string{"kind": "declined"}, "isStreaming": false, "content": text})
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{"messages": messages})
++	}))
++	t.Cleanup(upstream.Close)
++	s, dir := resultFixture(t, upstream.URL, true)
++	path, body := previewRequest(protocol, stream)
++	var v chatRequest
++	var err error
++	switch protocol {
++	case "chat":
++		v, err = s.normalizeChat([]byte(body))
++	case "messages":
++		v, _, err = s.normalizeMessages([]byte(body))
++	default:
++		v, err = s.normalizeResponses([]byte(body))
++	}
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, p := range s.projects {
++		p.ClientSent = hashes(v.Messages)
++		p.ClientSystems = systemHashes(v.Messages, nil)
++	}
++	if err := s.persistProjects(); err != nil {
++		t.Fatal(err)
++	}
++	proof := map[string]any{"account_id": "sub2api-50", "session_id": "original-session", "project_id": "original-project", "request_id": "native-user", "response_message_id": "native-job", "path": path, "request_sha256": previewSHA([]byte(body)), "result_sha256": previewSHA([]byte(text))}
++	return s, dir, path, body, proof, &gets, &writes
++}
++
++func servePreview(h http.Handler, path, body, account string) *httptest.ResponseRecorder {
++	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
++	r.Header.Set("Content-Type", "application/json")
++	if account != "" {
++		r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: account, Cookie: "original-cookie"}))
++	}
++	w := httptest.NewRecorder()
++	h.ServeHTTP(w, r)
++	return w
++}
++
++func TestRecoveryPreviewWire(t *testing.T) {
++	for _, protocol := range []string{"chat", "responses", "messages"} {
++		for _, stream := range []bool{false, true} {
++			t.Run(fmt.Sprintf("%s/stream=%t", protocol, stream), func(t *testing.T) {
++				s, dir, path, body, proof, gets, writes := previewFixture(t, protocol, stream, previewToolText)
++				before, err := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++				if err != nil {
++					t.Fatal(err)
++				}
++				h := previewHandler(t, s, proof)
++				var ids []string
++				for i := 0; i < 2; i++ {
++					w := servePreview(h, path, body, "sub2api-50")
++					if w.Code != 200 || w.Header().Get("X-Hark-Recovery-Preview") != "true" {
++						t.Fatalf("preview failed: %d %s", w.Code, w.Body)
++					}
++					wire := w.Body.String()
++					for _, part := range []string{"fixture_probe", "fixture-only"} {
++						if !strings.Contains(wire, part) {
++							t.Fatalf("original mock tool missing: %s", wire)
++						}
++					}
++					found := regexp.MustCompile(`(?:call_|toolu_)[a-f0-9]+`).FindAllString(wire, -1)
++					if len(found) == 0 {
++						t.Fatalf("no standard client call ID: %s", wire)
++					}
++					ids = append(ids, found[0])
++					if protocol == "responses" && stream && !strings.Contains(wire, "response.completed") {
++						t.Fatal("missing terminal Responses event")
++					}
++					if protocol == "messages" && stream && !strings.Contains(wire, "message_stop") {
++						t.Fatal("missing terminal Messages event")
++					}
++				}
++				if ids[0] != ids[1] {
++					t.Fatal("duplicate preview generated different client tool IDs")
++				}
++				after, _ := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++				if !bytes.Equal(before, after) || *gets != 2 || *writes != 0 || len(s.embed.m) != 0 || len(s.accounts) != 0 {
++					t.Fatal("preview mutated pending/context or touched account registry/upstream submission")
++				}
++				for _, p := range s.projects {
++					if p.PendingTurn == nil {
++						t.Fatal("transport preview acknowledged original pending turn")
++					}
++				}
++				t.Logf("RECOVERY_PREVIEW protocol=%s stream=%t original_GETs=2 writes=0 pending_preserved=true tool_id_stable=true", protocol, stream)
++			})
++		}
++	}
++}
++
++func TestRecoveryPreviewGuards(t *testing.T) {
++	for _, tc := range []struct {
++		name, change, text, code string
++		reads                    int
++	}{
++		{name: "wrong-account", change: "account", code: "recovery_preview_owner_mismatch"},
++		{name: "no-account", change: "no-account", code: "recovery_preview_owner_mismatch"},
++		{name: "wrong-session", change: "session", code: "recovery_preview_context_mismatch"},
++		{name: "changed-tool-schema", change: "body", code: "recovery_preview_request_mismatch"},
++		{name: "changed-history", change: "history", code: "recovery_preview_history_mismatch"},
++		{name: "changed-project", change: "project", code: "recovery_preview_history_mismatch"},
++		{name: "wrong-native-turn", change: "turn", code: "result_correlation_mismatch"},
++		{name: "busy", change: "busy", code: "session_busy"},
++		{name: "archive-not-allowed", change: "end", code: "recovery_preview_context_mismatch"},
++		{name: "result-changed", change: "result", code: "recovery_preview_result_mismatch", reads: 1},
++		{name: "unavailable-tool", text: `<tool_call>{"name":"unavailable","arguments":{}}</tool_call>`, code: "recovery_preview_tool_mismatch", reads: 1},
++		{name: "refusal-not-success", text: "Hark 不能充当其他应用背后的模型。", code: "upstream_declined", change: "declined", reads: 1},
++		{name: "processing-not-success", text: "processing-fixture", code: "recovery_preview_not_ready", reads: 1},
++		{name: "budget-failure-not-success", text: "cost-capped-fixture", code: "upstream_budget_exhausted", reads: 1},
++		{name: "unknown-proof-field", change: "proof-field", code: "recovery_preview_invalid_proof"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			text := tc.text
++			if text == "" {
++				text = previewToolText
++			}
++			s, dir, path, body, proof, gets, writes := previewFixture(t, "responses", false, text)
++			account := "sub2api-50"
++			switch tc.change {
++			case "account":
++				account = "sub2api-39"
++			case "no-account":
++				account = ""
++			case "session":
++				proof["session_id"] = "different-session"
++			case "body":
++				body = strings.Replace(body, `"required":["id"]`, `"required":[]`, 1)
++			case "history":
++				for _, p := range s.projects {
++					p.ClientSent = []string{"different-history"}
++				}
++				if err := s.persistProjects(); err != nil {
++					t.Fatal(err)
++				}
++			case "project":
++				proof["project_id"] = "other-project"
++			case "turn":
++				proof["request_id"] = "different-user"
++			case "busy":
++				for _, p := range s.projects {
++					p.Busy = true
++				}
++			case "end":
++				body = strings.Replace(body, `"session_id":"original-session"`, `"session_id":"original-session","session_end":true`, 1)
++				proof["request_sha256"] = previewSHA([]byte(body))
++			case "result":
++				proof["result_sha256"] = strings.Repeat("0", 64)
++			case "proof-field":
++				proof["arbitrary_project"] = "another-project"
++			}
++			before, _ := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++			w := servePreview(previewHandler(t, s, proof), path, body, account)
++			if w.Code < 400 || !strings.Contains(w.Body.String(), tc.code) {
++				t.Fatalf("guard failed: %d %s", w.Code, w.Body)
++			}
++			after, _ := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++			if !bytes.Equal(before, after) || *gets != tc.reads || *writes != 0 {
++				t.Fatalf("unsafe guard side effects: gets=%d writes=%d", *gets, *writes)
++			}
++		})
++	}
++}
++
++func TestRecoveryPreviewNotRegistered(t *testing.T) {
++	s, dir, path, body, proof, gets, writes := previewFixture(t, "responses", false, previewToolText)
++	_ = previewHandler(t, s, proof) // Constructing the adapter must not arm ordinary requests.
++	before, _ := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++	w := servePreview(s.EmbeddedHandler(), path, body, "sub2api-50")
++	if w.Code != 409 || !strings.Contains(w.Body.String(), "session_turn_pending") || *gets != 0 || *writes != 0 {
++		t.Fatalf("normal model path unexpectedly enabled replay: %d %s", w.Code, w.Body)
++	}
++	// Existing normal-model refusal touches LastUsed on release; it must still
++	// preserve the pending correlation and accepted history, not install a result.
++	after, _ := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++	var b, a map[string]map[string]any
++	_ = json.Unmarshal(before, &b)
++	_ = json.Unmarshal(after, &a)
++	for k, v := range b {
++		delete(v, "last_used")
++		delete(a[k], "last_used")
++	}
++	bj, _ := json.Marshal(b)
++	aj, _ := json.Marshal(a)
++	if !bytes.Equal(bj, aj) {
++		t.Fatal("ordinary pending retry altered accepted history")
++	}
++	t.Log("PRODUCTION_PATH unchanged=session_turn_pending preview_not_registered=true original_GETs=0 upstream_writes=0")
++}
 diff --git a/server.go b/server.go
 index 2328698..be4d42f 100644
 --- a/server.go
@@ -1047,10 +1670,10 @@ index 2328698..be4d42f 100644
 +	m.HandleFunc("GET /v1/sessions/{id}/result", s.sessionResult)
 diff --git a/session_result.go b/session_result.go
 new file mode 100644
-index 0000000..9c6b87e
+index 0000000..9f53cd3
 --- /dev/null
 +++ b/session_result.go
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,185 @@
 +package gateway
 +
 +import (
@@ -1063,25 +1686,53 @@ index 0000000..9c6b87e
 +	"unicode"
 +)
 +
-+// sessionResult is an embedded, administrator-facing diagnostic, not a model
-+// response. It never submits, acknowledges, or installs a turn or tool call.
++type sessionResultBody struct {
++	Text        string     `json:"text"`
++	Attachments []harkFile `json:"attachments"`
++}
++
++type sessionResultData struct {
++	ReadOnly            bool              `json:"read_only"`
++	ContinuationApplied bool              `json:"continuation_applied"`
++	SessionID           string            `json:"session_id"`
++	RequestID           string            `json:"request_id"`
++	ResponseMessageID   string            `json:"response_message_id"`
++	Status              string            `json:"status"`
++	ErrorCode           string            `json:"error_code"`
++	ErrorMessage        string            `json:"error_message"`
++	Result              sessionResultBody `json:"result"`
++}
++
++// sessionResult is an embedded diagnostic, never a model execution response.
 +func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
++	result, err := s.readSessionResult(r, "")
++	if err != nil {
++		// readSessionResult has already classified any upstream cancellation.
++		// Do not turn local validation errors into timeouts after cancellation.
++		if failure, ok := err.(*upstreamError); ok {
++			fail(w, failure.status, failure.code, failure.message)
++		} else {
++			fail(w, 500, "session_result_failed", "只读结果不可用")
++		}
++		return
++	}
++	write(w, 200, result)
++}
++
++func (s *Server) readSessionResult(r *http.Request, expectedProject string) (sessionResultData, error) {
 +	a, ok := embeddedAccount(r.Context())
 +	if !ok || s.embed == nil {
-+		fail(w, 401, "embedded_account_required", "只读恢复需要宿主管理员指定原账号")
-+		return
++		return sessionResultData{}, &upstreamError{401, "embedded_account_required", "只读恢复需要宿主管理员指定原账号"}
 +	}
 +	sessionID := r.PathValue("id")
 +	if sessionID == "" || validateSession(chatRequest{SessionID: sessionID}) != nil {
-+		fail(w, 400, "invalid_session", "会话 ID 无效")
-+		return
++		return sessionResultData{}, &upstreamError{400, "invalid_session", "会话 ID 无效"}
 +	}
 +	// Do not accept a Project supplied by the caller, duplicate selectors, or
 +	// silently ignored malformed query parameters.
 +	q, err := parseResultQuery(r)
 +	if err != nil {
-+		fail(w, 400, "invalid_result_selector", "只支持成对的 request_id 和 response_message_id")
-+		return
++		return sessionResultData{}, &upstreamError{400, "invalid_result_selector", "只支持成对的 request_id 和 response_message_id"}
 +	}
 +	requestID, expected := q.Get("request_id"), q.Get("response_message_id")
 +	id := projectMapping(r, sessionID)
@@ -1089,13 +1740,15 @@ index 0000000..9c6b87e
 +	p := s.projects[id]
 +	if p == nil || p.AccountID != a.ID || p.ConversationID == "" || p.Archived || p.Ending {
 +		s.projectMu.Unlock()
-+		fail(w, 404, "session_not_found", "原账号下没有可读取的会话映射")
-+		return
++		return sessionResultData{}, &upstreamError{404, "session_not_found", "原账号下没有可读取的会话映射"}
 +	}
 +	if p.Busy {
 +		s.projectMu.Unlock()
-+		fail(w, 409, "session_busy", "原会话仍在处理中；未重发请求")
-+		return
++		return sessionResultData{}, &upstreamError{409, "session_busy", "原会话仍在处理中；未重发请求"}
++	}
++	if expectedProject != "" && p.ConversationID != expectedProject {
++		s.projectMu.Unlock()
++		return sessionResultData{}, &upstreamError{409, "session_changed", "预演原 Project 已变化；未读取其他 Project"}
 +	}
 +	// Copy under the mutex, never use lockSession/releaseProject: those update
 +	// LastUsed, cursors and the on-disk mapping even on failed requests.
@@ -1110,16 +1763,13 @@ index 0000000..9c6b87e
 +	}
 +	s.projectMu.Unlock()
 +	if !validResultID(requestID) || !validResultID(expected) || requestID == expected {
-+		fail(w, 400, "result_correlation_required", "旧会话需要明确提供原始请求及响应关联 ID")
-+		return
++		return sessionResultData{}, &upstreamError{400, "result_correlation_required", "旧会话需要明确提供原始请求及响应关联 ID"}
 +	}
 +	if hasPending && (pending.RequestID != requestID || pending.Expected != expected) {
-+		fail(w, 409, "result_correlation_mismatch", "关联 ID 与原会话待恢复请求不一致")
-+		return
++		return sessionResultData{}, &upstreamError{409, "result_correlation_mismatch", "关联 ID 与原会话待恢复请求不一致"}
 +	}
 +	if a.Cookie == "" || validAccountProxy(a.Proxy) != nil {
-+		fail(w, 400, "invalid_original_account", "原账号凭据或代理配置不可用；未换号")
-+		return
++		return sessionResultData{}, &upstreamError{400, "invalid_original_account", "原账号凭据或代理配置不可用；未换号"}
 +	}
 +	// A private reader uses exactly the supplied account's current cookie,
 +	// proxy and UA. No account refresh, scheduler, usage probe or registry write.
@@ -1135,8 +1785,7 @@ index 0000000..9c6b87e
 +	messages, err := reader.fetchHistory(ctx, a.Cookie, cid)
 +	if err != nil {
 +		status, code, detail := turnError(ctx, err)
-+		fail(w, status, code, detail)
-+		return
++		return sessionResultData{}, &upstreamError{status, code, detail}
 +	}
 +	// A legacy selector is not trusted just because it was supplied by an
 +	// administrator: require the native user AND its linked primary job.
@@ -1152,8 +1801,7 @@ index 0000000..9c6b87e
 +		}
 +	}
 +	if users != 1 || primaries != 1 || !correlated {
-+		fail(w, 409, "result_correlation_unverified", "原始事件未证实请求与响应属于同一轮；未返回其他轮结果")
-+		return
++		return sessionResultData{}, &upstreamError{409, "result_correlation_unverified", "原始事件未证实请求与响应属于同一轮；未返回其他轮结果"}
 +	}
 +	// If a submission/end happened during the one bounded GET, refuse the
 +	// stale view without modifying either the old or the new state.
@@ -1167,8 +1815,7 @@ index 0000000..9c6b87e
 +	}
 +	s.projectMu.Unlock()
 +	if changed {
-+		fail(w, 409, "session_changed", "读取期间原会话状态已变化；未应用恢复结果")
-+		return
++		return sessionResultData{}, &upstreamError{409, "session_changed", "读取期间原会话状态已变化；未应用恢复结果"}
 +	}
 +	reply, resultErr := completedProjectReply(messages, expected, requestID)
 +	status, code, detail := reply.Outcome, "", ""
@@ -1189,12 +1836,8 @@ index 0000000..9c6b87e
 +			status = "awaiting_client_tool"
 +		}
 +	}
-+	write(w, 200, map[string]any{
-+		"read_only": true, "continuation_applied": false, "session_id": sessionID,
-+		"request_id": requestID, "response_message_id": expected, "status": status,
-+		"error_code": code, "error_message": detail,
-+		"result": map[string]any{"text": reply.Text, "attachments": reply.Attachments},
-+	})
++	return sessionResultData{ReadOnly: true, SessionID: sessionID, RequestID: requestID, ResponseMessageID: expected,
++		Status: status, ErrorCode: code, ErrorMessage: detail, Result: sessionResultBody{Text: reply.Text, Attachments: reply.Attachments}}, nil
 +}
 +
 +func validResultID(id string) bool {
