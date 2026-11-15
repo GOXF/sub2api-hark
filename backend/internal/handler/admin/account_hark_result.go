@@ -75,7 +75,7 @@ func (h *AccountHandler) GetHarkSessionResult(c *gin.Context) {
 		response.InternalError(c, "Read-only result lookup failed")
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	const limit = 64 * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil || len(body) > limit {
