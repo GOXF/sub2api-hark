@@ -10,18 +10,16 @@ import (
 	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/harkembed/gateway"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 // Client-visible model labelling. Hark accounts map every client model to
 // "hark" (forceHarkModel), which is a transport name, not the public model
-// identifier selected by the client. When the
-// original client model is known (ctxkey.HarkRequestedModel, set by the
-// service layer for Hark accounts only), a short system-level note is added
-// that tells the model how to answer questions about its identity. It is
-// deterministic for a given model, and placed where it stays stable from turn
-// to turn (the gateway hashes the message history to continue a Project).
+// identifier selected by the client. Explicit identity questions may carry a
+// gateway-owned note, separately from the original client history. Changing
+// its scope, template or switch must not change the history fingerprints.
 //
 // The admin setting enable_hark_model_label turns it off by not setting the
 // context value; hark_model_label_prompt edits the text. HARK_MODEL_LABEL=off
@@ -131,32 +129,49 @@ func labelFormatOf(path string) labelFormat {
 	return labelNone
 }
 
-// injectModelLabel adds the identity note for the client model carried in the
-// request context to Chat Completions, Responses and Anthropic Messages
-// bodies. Anything else (other paths, non-JSON, unexpected shapes, label off,
-// no model or the model "hark") is left untouched.
+// injectModelLabel carries a scoped identity note and a legacy-prefix candidate
+// in trusted in-process context. It never adds identity text to client JSON.
+// The old labelled body is only for exact pre-upgrade history verification.
 func injectModelLabel(req *http.Request) error {
 	if req == nil || req.Method != http.MethodPost || req.Body == nil || req.Body == http.NoBody || req.URL == nil {
 		return nil
 	}
 	format := labelFormatOf(req.URL.Path)
-	if format == labelNone || !modelLabelEnabled() {
+	if format == labelNone {
 		return nil
 	}
 	model := requestedModel(req)
-	if model == "" {
+	legacyModel := model
+	if legacyModel == "" {
+		for _, key := range []ctxkey.Key{ctxkey.Model, ctxkey.RequestedPublicModel} {
+			if m, ok := req.Context().Value(key).(string); ok {
+				m = sanitizeLabelModel(m)
+				if m != "" && !strings.EqualFold(m, Model) && !strings.ContainsAny(m, "*?") {
+					legacyModel = m
+					break
+				}
+			}
+		}
+	}
+	if legacyModel == "" {
 		return nil
 	}
 	if ct := strings.ToLower(req.Header.Get("Content-Type")); ct != "" && !strings.Contains(ct, "json") {
 		return nil
 	}
+	_, identityAsked := mappedIdentityScope(req)
 	body, err := io.ReadAll(req.Body)
 	_ = req.Body.Close()
 	if err != nil {
 		return err
 	}
-	if out, ok := labelBody(bytes.TrimSpace(body), format, modelLabelNote(labelTemplate(req), model)); ok {
-		body = out
+	legacyBody, ok := labelBody(bytes.TrimSpace(body), format, modelLabelNote(labelTemplate(req), legacyModel))
+	if ok {
+		note := ""
+		if model != "" && modelLabelEnabled() && identityAsked {
+			note = modelLabelNote(labelTemplate(req), model)
+		}
+		*req = *req.WithContext(gateway.WithModelLabel(req.Context(), note, legacyBody))
 	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
@@ -166,6 +181,7 @@ func injectModelLabel(req *http.Request) error {
 }
 
 // labelBody returns body with note added in the format's system slot.
+// labelBody freezes the previous release's shape for legacy-prefix checks only.
 func labelBody(body []byte, format labelFormat, note string) ([]byte, bool) {
 	if len(body) == 0 || body[0] != '{' || !gjson.ValidBytes(body) {
 		return nil, false

@@ -65,13 +65,15 @@ func withHarkRequestedModel(req *http.Request, settings *SettingService) *http.R
 	if settings != nil {
 		enabled, prompt = settings.GetHarkModelLabelSettings(ctx)
 	}
-	if !enabled {
-		return req
-	}
-	ctx = context.WithValue(ctx, ctxkey.HarkRequestedModel, model)
 	if strings.TrimSpace(prompt) != "" {
 		ctx = context.WithValue(ctx, ctxkey.HarkModelLabelPrompt, prompt)
 	}
+	if !enabled {
+		// Keep the template available only for exact legacy-prefix verification.
+		// Without HarkRequestedModel no identity response adaptation is enabled.
+		return req.WithContext(ctx)
+	}
+	ctx = context.WithValue(ctx, ctxkey.HarkRequestedModel, model)
 	return req.WithContext(ctx)
 }
 

@@ -52,7 +52,10 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}
 	defer s.releaseProject(p)
 
-	plan := planTurn(p, v.Messages)
+	plan, err := s.planModelLabelTurn(r, p, v)
+	if err != nil {
+		return err
+	}
 	if plan.reset {
 		oldCID, oldAccount := p.ConversationID, p.AccountID
 		if cookie := s.cookieFor(oldAccount); cookie != "" && oldCID != "" {
@@ -70,6 +73,9 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 		return err
 	}
 	text, files := renderTurn(plan.send)
+	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" {
+		text = "SYSTEM: " + label.note + "\n\n" + text
+	}
 	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
 	if len(files) > maxFilesPerRequest {
 		return &statusInputError{400, "too_many_files", fmt.Sprintf("单轮最多上传 %d 个附件", maxFilesPerRequest)}
@@ -147,6 +153,9 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
 		s.projectMu.Lock()
 		p.Sent, p.Systems = plan.sent, plan.systems
+		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
+			p.LabelHistoryVersion = 1
+		}
 		p.Turns++
 		s.projectMu.Unlock()
 		s.persistProjects()
@@ -317,7 +326,17 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 	compact := isCheckpointCompaction(v)
 	w.Header().Set("X-Hark-Context-Isolation", "instruction-only")
 	toolsNote := ""
+	if compact && !requiresClientTool(v) {
+		// A checkpoint summarizes existing task context; it must not install an
+		// execution protocol or forward raw native tools through forward-extra.
+		v.Tools, v.ToolChoice = nil, "none"
+		for _, field := range []string{"tools", "additional_tools", "tool_choice", "parallel_tool_calls"} {
+			delete(v.extra, field)
+		}
+	}
 	switch {
+	case compact:
+		toolsNote = "摘要请求不携带执行工具协议"
 	case v.ToolsDeclared > 0 && s.forwardExtra:
 		toolsNote = "已开启 forward-extra，未做工具调用模拟"
 	case v.ToolsDeclared > 0 && len(v.Tools) == 0:
@@ -344,6 +363,10 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			l.ToolCalls = len(res.ToolCalls)
 		})
 	}()
+	if compact && requiresClientTool(v) {
+		s.turnFailed(w, r, ctx, &upstreamError{400, "compaction_tool_choice_conflict", "摘要请求与必需工具调用冲突；未发送上游，请分别提交摘要请求和执行请求"}, format)
+		return
+	}
 	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
 		s.turnFailed(w, r, ctx, err, format)
 		return

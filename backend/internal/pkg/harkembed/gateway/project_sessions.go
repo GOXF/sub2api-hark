@@ -28,7 +28,9 @@ type projectSession struct {
 	Sent           []string  `json:"sent,omitempty"`
 	Systems        []string  `json:"systems,omitempty"`
 	Turns          int       `json:"turns,omitempty"`
-	Busy           bool      `json:"-"`
+	// Version 1 hashes original client history, without gateway model notes.
+	LabelHistoryVersion int  `json:"label_history_version,omitempty"`
+	Busy                bool `json:"-"`
 }
 
 func validateSession(v chatRequest) error {
