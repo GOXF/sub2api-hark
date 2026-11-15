@@ -12,7 +12,7 @@ var (
 	backendRoleRefusal = regexp.MustCompile(`^(?:Hark[ 	]*|我)(?:不能|不支持|无法|没法)(?:被)?(?:当作|作为|用作|充当)(?:其他|其它|别的|另一个|第三方)(?:应用|程序|软件)(?:背后)?的模型(?:来)?(?:使用|调用|用)?(?:[。，；,;]|$)`)
 	// Only a request to state the task and an offer to help may follow. An
 	// arbitrary suffix could contain real work, a quotation or a negation.
-	backendRoleRedirect = regexp.MustCompile(`^(?:不过|但是|但)?(?:如果)?(?:你(?:可以)?(?:直接)?告诉我(?:你)?(?:实际)?想(?:解决|完成|做成)什么(?:问题|事情|事)?|你想(?:完成|做成)什么事[，,]?(?:可以)?直接告诉我)(?:[，,]比如[^，。；;]{1,80}(?:具体指什么)?)?[，,](?:我很乐意(?:直接)?(?:在这里)?(?:直接)?帮(?:你|忙)|我会在这里帮你)[。！.!]?$`)
+	backendRoleRedirect = regexp.MustCompile(`^(?:不过|但是|但)?(?:如果)?(?:你(?:可以)?(?:直接)?(?:在这里)?告诉我(?:你)?(?:实际)?想(?:解决|完成|做成|做)什么(?:问题|事情|事)?|你想(?:完成|做成)什么事[，,]?(?:可以)?直接告诉我)(?:[，,]比如[^，。；;]{1,80}(?:具体指什么)?)?[，,](?:我很乐意(?:直接)?(?:在这里)?(?:直接)?帮(?:你|忙)|我会在这里帮你)[。！.!]?$`)
 )
 
 // recordedBackendRefusal is a conservative fallback for plain-text refusals.

@@ -11,6 +11,7 @@ func TestOrdinaryScreenshotRefusalRecognition(t *testing.T) {
 	texts := []string{
 		"Hark 不能被用作其他应用背后的模型，不过如果你告诉我你想完成什么，我很乐意直接帮你。",
 		"Hark 不能被当作其他应用背后的模型来调用。如果你直接告诉我想做成什么，比如“缺少导出 SUB2api-HARK”具体指什么，我很乐意在这里帮你。",
+		"Hark 不能被用作其他应用背后的模型。如果你直接在这里告诉我想做什么，比如直接发截图问这是什么软件，我很乐意帮你。",
 	}
 	for _, text := range texts {
 		for _, variant := range []string{"exact", "quoted", "example", "code", "multiline", "same_line_work", "other_source", "streaming", "unknown_streaming"} {

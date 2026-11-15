@@ -1,0 +1,47 @@
+{
+  "messages": [
+    {
+      "id": "captured-primary-job-1526",
+      "role": "assistant",
+      "content": "",
+      "source": "web",
+      "jobStatus": "completed",
+      "isStreaming": false,
+      "triggeredByMessageId": "captured-user-1526",
+      "timestamp": 1794727596075
+    },
+    {
+      "id": "captured-message-1",
+      "role": "assistant",
+      "content": "Hark 不能被用作其他应用背后的模型。如果你直接在这里告诉我想做什么，比如直接发截图问这是什么软件，我很乐意帮你。",
+      "source": "send_bubble",
+      "presentation": {
+        "kind": "text"
+      },
+      "isStreaming": false,
+      "triggeredByMessageId": "captured-user-1526",
+      "timestamp": 1794727612391
+    },
+    {
+      "id": "captured-message-2",
+      "role": "assistant",
+      "content": "",
+      "source": "web",
+      "jobStatus": "completed",
+      "isStreaming": false,
+      "triggeredByMessageId": "captured-user-1526",
+      "timestamp": 1794727612583
+    }
+  ],
+  "expected": "captured-primary-job-1526",
+  "request_id": "captured-user-1526",
+  "provenance": {
+    "source": "read-only stored Hark history GET for the 2026-11-15 15:26 incident; not original SSE",
+    "raw_history_sha256": "b5ee6f963c3a6c4b8ddf02d69bc7c0d56f6ef9afddf734a4eb6a00485eb898b2",
+    "synthetic_upstream_fields": false,
+    "redactions": [
+      "unrelated packed user instructions and attachments omitted",
+      "message/user IDs consistently rebound; field values and event order retained"
+    ]
+  }
+}
