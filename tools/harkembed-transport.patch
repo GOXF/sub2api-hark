@@ -387,7 +387,7 @@ index 0000000..5b7295b
 +}
 diff --git a/declined.go b/declined.go
 new file mode 100644
-index 0000000..4dba8e2
+index 0000000..c131001
 --- /dev/null
 +++ b/declined.go
 @@ -0,0 +1,42 @@
@@ -405,7 +405,7 @@ index 0000000..4dba8e2
 +	backendRoleRefusal = regexp.MustCompile(`^(?:Hark[ 	]*|我)(?:不能|不支持|无法|没法)(?:被)?(?:当作|作为|用作|充当)(?:其他|其它|别的|另一个|第三方)(?:应用|程序|软件)(?:背后)?的模型(?:来)?(?:使用|调用|用)?(?:[。，；,;]|$)`)
 +	// Only a request to state the task and an offer to help may follow. An
 +	// arbitrary suffix could contain real work, a quotation or a negation.
-+	backendRoleRedirect = regexp.MustCompile(`^(?:不过|但是|但)?(?:如果)?(?:你(?:可以)?(?:直接)?告诉我(?:你)?(?:实际)?想(?:解决|完成|做成)什么(?:问题|事情|事)?|你想(?:完成|做成)什么事[，,]?(?:可以)?直接告诉我)(?:[，,]比如[^，。；;]{1,80}(?:具体指什么)?)?[，,](?:我很乐意(?:直接)?(?:在这里)?(?:直接)?帮(?:你|忙)|我会在这里帮你)[。！.!]?$`)
++	backendRoleRedirect = regexp.MustCompile(`^(?:不过|但是|但)?(?:如果)?(?:你(?:可以)?(?:直接)?(?:在这里)?告诉我(?:你)?(?:实际)?想(?:解决|完成|做成|做)什么(?:问题|事情|事)?|你想(?:完成|做成)什么事[，,]?(?:可以)?直接告诉我)(?:[，,]比如[^，。；;]{1,80}(?:具体指什么)?)?[，,](?:我很乐意(?:直接)?(?:在这里)?(?:直接)?帮(?:你|忙)|我会在这里帮你)[。！.!]?$`)
 +)
 +
 +// recordedBackendRefusal is a conservative fallback for plain-text refusals.
@@ -814,10 +814,10 @@ index 0000000..069a92b
 +}
 diff --git a/ordinary_refusal_test.go b/ordinary_refusal_test.go
 new file mode 100644
-index 0000000..52d3973
+index 0000000..7235aca
 --- /dev/null
 +++ b/ordinary_refusal_test.go
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,59 @@
 +package gateway
 +
 +import (
@@ -831,6 +831,7 @@ index 0000000..52d3973
 +	texts := []string{
 +		"Hark 不能被用作其他应用背后的模型，不过如果你告诉我你想完成什么，我很乐意直接帮你。",
 +		"Hark 不能被当作其他应用背后的模型来调用。如果你直接告诉我想做成什么，比如“缺少导出 SUB2api-HARK”具体指什么，我很乐意在这里帮你。",
++		"Hark 不能被用作其他应用背后的模型。如果你直接在这里告诉我想做什么，比如直接发截图问这是什么软件，我很乐意帮你。",
 +	}
 +	for _, text := range texts {
 +		for _, variant := range []string{"exact", "quoted", "example", "code", "multiline", "same_line_work", "other_source", "streaming", "unknown_streaming"} {
@@ -1497,6 +1498,59 @@ index 0000000..197fd8e
 +      "jobStatus": "completed"
 +    }
 +  ]
++}
+diff --git a/testdata/refusal_event_20261115_1526.json b/testdata/refusal_event_20261115_1526.json
+new file mode 100644
+index 0000000..d76a04f
+--- /dev/null
++++ b/testdata/refusal_event_20261115_1526.json
+@@ -0,0 +1,47 @@
++{
++  "messages": [
++    {
++      "id": "captured-primary-job-1526",
++      "role": "assistant",
++      "content": "",
++      "source": "web",
++      "jobStatus": "completed",
++      "isStreaming": false,
++      "triggeredByMessageId": "captured-user-1526",
++      "timestamp": 1794727596075
++    },
++    {
++      "id": "captured-message-1",
++      "role": "assistant",
++      "content": "Hark 不能被用作其他应用背后的模型。如果你直接在这里告诉我想做什么，比如直接发截图问这是什么软件，我很乐意帮你。",
++      "source": "send_bubble",
++      "presentation": {
++        "kind": "text"
++      },
++      "isStreaming": false,
++      "triggeredByMessageId": "captured-user-1526",
++      "timestamp": 1794727612391
++    },
++    {
++      "id": "captured-message-2",
++      "role": "assistant",
++      "content": "",
++      "source": "web",
++      "jobStatus": "completed",
++      "isStreaming": false,
++      "triggeredByMessageId": "captured-user-1526",
++      "timestamp": 1794727612583
++    }
++  ],
++  "expected": "captured-primary-job-1526",
++  "request_id": "captured-user-1526",
++  "provenance": {
++    "source": "read-only stored Hark history GET for the 2026-11-15 15:26 incident; not original SSE",
++    "raw_history_sha256": "b5ee6f963c3a6c4b8ddf02d69bc7c0d56f6ef9afddf734a4eb6a00485eb898b2",
++    "synthetic_upstream_fields": false,
++    "redactions": [
++      "unrelated packed user instructions and attachments omitted",
++      "message/user IDs consistently rebound; field values and event order retained"
++    ]
++  }
 +}
 diff --git a/testdata/turn_status_trace.json b/testdata/turn_status_trace.json
 new file mode 100644
