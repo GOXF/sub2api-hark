@@ -28,9 +28,12 @@ type projectSession struct {
 	Sent           []string  `json:"sent,omitempty"`
 	Systems        []string  `json:"systems,omitempty"`
 	Turns          int       `json:"turns,omitempty"`
-	// Version 1 hashes original client history, without gateway model notes.
-	LabelHistoryVersion int  `json:"label_history_version,omitempty"`
-	Busy                bool `json:"-"`
+	// Version 2 keeps the old sent/systems reader compatible with rollback,
+	// while the new planner uses the unmodified client-history fingerprints.
+	LabelHistoryVersion int      `json:"label_history_version,omitempty"`
+	ClientSent          []string `json:"client_sent,omitempty"`
+	ClientSystems       []string `json:"client_systems,omitempty"`
+	Busy                bool     `json:"-"`
 }
 
 func validateSession(v chatRequest) error {
@@ -171,6 +174,9 @@ type turnPlan struct {
 	mode    string // new | tail | append
 	sent    []string
 	systems []string
+	// Legacy-shaped cursors are stored, not sent, for old binary readers.
+	legacySent    []string
+	legacySystems []string
 }
 
 func hashes(messages []chatMessage) []string {

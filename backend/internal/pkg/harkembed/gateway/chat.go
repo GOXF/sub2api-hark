@@ -154,7 +154,11 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 		s.projectMu.Lock()
 		p.Sent, p.Systems = plan.sent, plan.systems
 		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
-			p.LabelHistoryVersion = 1
+			p.ClientSent, p.ClientSystems = plan.sent, plan.systems
+			p.Sent, p.Systems = plan.legacySent, plan.legacySystems
+			p.LabelHistoryVersion = 2
+		} else {
+			p.LabelHistoryVersion, p.ClientSent, p.ClientSystems = 0, nil, nil
 		}
 		p.Turns++
 		s.projectMu.Unlock()

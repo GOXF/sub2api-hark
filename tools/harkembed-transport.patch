@@ -173,7 +173,7 @@ index 0000000..547f2f9
 +	return conn, nil
 +}
 diff --git a/chat.go b/chat.go
-index a1e0482..01891df 100644
+index a1e0482..7f9824c 100644
 --- a/chat.go
 +++ b/chat.go
 @@ -55 +55,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
@@ -191,16 +191,20 @@ index a1e0482..01891df 100644
 @@ -147 +153 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
 +	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
-@@ -149,0 +156,3 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -149,0 +156,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 +		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
-+			p.LabelHistoryVersion = 1
++			p.ClientSent, p.ClientSystems = plan.sent, plan.systems
++			p.Sent, p.Systems = plan.legacySent, plan.legacySystems
++			p.LabelHistoryVersion = 2
++		} else {
++			p.LabelHistoryVersion, p.ClientSent, p.ClientSystems = 0, nil, nil
 +		}
-@@ -204 +213 @@ func (s *Server) recordSuccess(accountID, outcome string) {
+@@ -204 +217 @@ func (s *Server) recordSuccess(accountID, outcome string) {
 -		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
 +		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
-@@ -316,0 +326 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -316,0 +330 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	compact := isCheckpointCompaction(v)
-@@ -318,0 +329,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -318,0 +333,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && !requiresClientTool(v) {
 +		// A checkpoint summarizes existing task context; it must not install an
 +		// execution protocol or forward raw native tools through forward-extra.
@@ -209,10 +213,10 @@ index a1e0482..01891df 100644
 +			delete(v.extra, field)
 +		}
 +	}
-@@ -319,0 +338,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -319,0 +342,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	case compact:
 +		toolsNote = "摘要请求不携带执行工具协议"
-@@ -345,0 +366,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -345,0 +370,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && requiresClientTool(v) {
 +		s.turnFailed(w, r, ctx, &upstreamError{400, "compaction_tool_choice_conflict", "摘要请求与必需工具调用冲突；未发送上游，请分别提交摘要请求和执行请求"}, format)
 +		return
@@ -221,25 +225,25 @@ index a1e0482..01891df 100644
 +		s.turnFailed(w, r, ctx, err, format)
 +		return
 +	}
-@@ -347,0 +376,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -347,0 +380,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if err == nil {
 +			err = declinedTurnFailure(compact, res)
 +			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		}
-@@ -352,0 +385,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -352,0 +389,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 +			s.turnFailed(w, r, ctx, err, format)
 +			return
 +		}
-@@ -363,0 +401 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -363,0 +405 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	var latestStatus turnStatus
-@@ -399 +437,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -399 +441,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 +			// A required-tool turn is validated before releasing assistant text.
 +			// Keepalives still flow, and ordinary auto/none turns stay incremental.
 +			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -416,0 +457,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -416,0 +461,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
 +		hooks.status = func(status turnStatus) {
 +			mu.Lock()
@@ -251,7 +255,7 @@ index a1e0482..01891df 100644
 +			emit("hark.status", status)
 +		}
 +	}
-@@ -419,0 +471,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -419,0 +475,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +	if err == nil {
 +		err = declinedTurnFailure(compact, res)
@@ -260,15 +264,15 @@ index a1e0482..01891df 100644
 +		s.applyToolCalls(v, res)
 +		err = validateClientToolResult(v, res.ToolCalls)
 +	}
-@@ -425,0 +485,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -425,0 +489,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 +			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 +			latestStatus.Sequence++
 +			emit("hark.status", latestStatus)
 +		}
-@@ -437 +500,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -437 +504,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -	s.applyToolCalls(v, res)
-@@ -452,0 +516,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -452,0 +520,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 +		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
 +		latestStatus.Sequence++
@@ -607,10 +611,10 @@ index 6e1e335..6dde968 100644
 +	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
 diff --git a/model_label.go b/model_label.go
 new file mode 100644
-index 0000000..15a5346
+index 0000000..005afe0
 --- /dev/null
 +++ b/model_label.go
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,71 @@
 +package gateway
 +
 +import (
@@ -622,23 +626,28 @@ index 0000000..15a5346
 +type modelLabelKey struct{}
 +
 +type modelLabelContext struct {
-+	note       string
-+	legacyBody []byte
++	note         string
++	legacyBody   []byte
++	legacyActive bool
 +}
 +
 +// WithModelLabel carries gateway-owned instructions separately from client
 +// history. legacyBody is used only to recognize a pre-upgrade history prefix;
 +// it is never sent, installed as a summary, or accepted from an HTTP header.
-+func WithModelLabel(ctx context.Context, note string, legacyBody []byte) context.Context {
-+	return context.WithValue(ctx, modelLabelKey{}, modelLabelContext{note: note, legacyBody: legacyBody})
++func WithModelLabel(ctx context.Context, note string, legacyBody []byte, legacyActive bool) context.Context {
++	return context.WithValue(ctx, modelLabelKey{}, modelLabelContext{note: note, legacyBody: legacyBody, legacyActive: legacyActive})
 +}
 +
 +func (s *Server) planModelLabelTurn(r *http.Request, p *projectSession, v chatRequest) (turnPlan, error) {
-+	plan := planTurn(p, v.Messages)
 +	label, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext)
-+	if !owned || !plan.reset || p.LabelHistoryVersion != 0 {
-+		return plan, nil
++	if !owned {
++		return planTurn(p, v.Messages), nil
 +	}
++	current := *p
++	if p.LabelHistoryVersion == 2 {
++		current.Sent, current.Systems = p.ClientSent, p.ClientSystems
++	}
++	plan := planTurn(&current, v.Messages)
 +	// Older releases hashed the injected system note. Only an exact legacy
 +	// prefix proves the same client history; never ignore arbitrary system edits.
 +	var legacy chatRequest
@@ -651,13 +660,27 @@ index 0000000..15a5346
 +	default:
 +		legacy, err = s.normalizeChat(label.legacyBody)
 +	}
-+	if err == nil {
-+		old := planTurn(p, legacy.Messages)
-+		if !old.reset && old.mode == "tail" {
-+			plan.send, plan.reset, plan.mode, plan.reason = old.send, false, "tail", ""
-+			plan.systems = systemHashes(v.Messages, nil)
-+			return plan, nil
-+		}
++	if err != nil {
++		return turnPlan{}, err
++	}
++	rollbackMessages := v.Messages
++	if label.legacyActive {
++		rollbackMessages = legacy.Messages
++	}
++	plan.legacySent = hashes(rollbackMessages)
++	previousSystems := p.Systems
++	if plan.reset {
++		previousSystems = nil
++	}
++	plan.legacySystems = systemHashes(rollbackMessages, previousSystems)
++	if !plan.reset || p.LabelHistoryVersion != 0 {
++		return plan, nil
++	}
++	old := planTurn(p, legacy.Messages)
++	if !old.reset && old.mode == "tail" {
++		plan.send, plan.reset, plan.mode, plan.reason = old.send, false, "tail", ""
++		plan.systems = systemHashes(v.Messages, nil)
++		return plan, nil
 +	}
 +	// A changed custom template cannot be recovered from a one-way old hash.
 +	// Preserve the Project rather than archiving it or guessing lost history.
@@ -854,14 +877,21 @@ index 0000000..52d3973
 +	}
 +}
 diff --git a/project_sessions.go b/project_sessions.go
-index 8872c98..1a2327b 100644
+index 8872c98..1ac166a 100644
 --- a/project_sessions.go
 +++ b/project_sessions.go
-@@ -31 +31,3 @@ type projectSession struct {
+@@ -31 +31,6 @@ type projectSession struct {
 -	Busy           bool      `json:"-"`
-+	// Version 1 hashes original client history, without gateway model notes.
-+	LabelHistoryVersion int  `json:"label_history_version,omitempty"`
-+	Busy                bool `json:"-"`
++	// Version 2 keeps the old sent/systems reader compatible with rollback,
++	// while the new planner uses the unmodified client-history fingerprints.
++	LabelHistoryVersion int      `json:"label_history_version,omitempty"`
++	ClientSent          []string `json:"client_sent,omitempty"`
++	ClientSystems       []string `json:"client_systems,omitempty"`
++	Busy                bool     `json:"-"`
+@@ -171,0 +177,3 @@ type turnPlan struct {
++	// Legacy-shaped cursors are stored, not sent, for old binary readers.
++	legacySent    []string
++	legacySystems []string
 diff --git a/proxy_pool.go b/proxy_pool.go
 index bde38c0..a292d77 100644
 --- a/proxy_pool.go

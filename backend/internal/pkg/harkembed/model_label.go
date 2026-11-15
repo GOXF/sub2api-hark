@@ -171,7 +171,7 @@ func injectModelLabel(req *http.Request) error {
 		if model != "" && modelLabelEnabled() && identityAsked {
 			note = modelLabelNote(labelTemplate(req), model)
 		}
-		*req = *req.WithContext(gateway.WithModelLabel(req.Context(), note, legacyBody))
+		*req = *req.WithContext(gateway.WithModelLabel(req.Context(), note, legacyBody, model != "" && modelLabelEnabled()))
 	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))

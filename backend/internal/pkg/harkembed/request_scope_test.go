@@ -217,6 +217,40 @@ func TestRequestScopeLegacyContinuation(t *testing.T) {
 	}
 }
 
+func TestRequestScopeDowngradeContinuesUpdatedHistory(t *testing.T) {
+	for _, protocol := range []string{"chat", "responses", "messages"} {
+		t.Run(protocol, func(t *testing.T) {
+			f := newScopeFixture(t)
+			messages := []map[string]any{{"role": "user", "content": "Remember task alpha."}}
+			resp, body := f.submit(t, protocol, messages, true)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("old release bootstrap: status=%d body=%s", resp.StatusCode, body)
+			}
+			f.restart(t)
+			messages = append(messages, map[string]any{"role": "assistant", "content": scopeFixtureAnswer}, map[string]any{"role": "user", "content": "Continue task alpha."})
+			resp, body = f.submit(t, protocol, messages, false)
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Hark-Project-Reset") == "true" {
+				t.Fatalf("new release continuation: status=%d body=%s", resp.StatusCode, body)
+			}
+			f.restart(t)
+			messages = append(messages, map[string]any{"role": "assistant", "content": scopeFixtureAnswer}, map[string]any{"role": "user", "content": "Continue after rollback."})
+			// The old reader uses the persisted sent/systems fields and its old
+			// body shape; no new model-label context or migration hook is used.
+			resp, body = f.submit(t, protocol, messages, true)
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			t.Logf("DOWNGRADE protocol=%s creates=%d reset=%s turns=%d", protocol, f.creates, resp.Header.Get("X-Hark-Project-Reset"), len(f.sends))
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Hark-Project-Reset") == "true" || f.creates != 1 || len(f.sends) != 3 {
+				t.Fatalf("old reader cannot resume updated session: status=%d creates=%d body=%s", resp.StatusCode, f.creates, body)
+			}
+			last := f.sends[2]
+			if last["conversationId"] != "scope-project-1" || !strings.Contains(last["message"], "Continue after rollback.") || strings.Contains(last["message"], "Remember task alpha.") || strings.Contains(last["message"], "Continue task alpha.") {
+				t.Fatal("rollback replayed accepted task context")
+			}
+		})
+	}
+}
+
 func TestRequestScopeOrdinaryOmitsIdentity(t *testing.T) {
 	for _, protocol := range []string{"chat", "responses", "messages"} {
 		t.Run(protocol, func(t *testing.T) {

@@ -9,23 +9,28 @@ import (
 type modelLabelKey struct{}
 
 type modelLabelContext struct {
-	note       string
-	legacyBody []byte
+	note         string
+	legacyBody   []byte
+	legacyActive bool
 }
 
 // WithModelLabel carries gateway-owned instructions separately from client
 // history. legacyBody is used only to recognize a pre-upgrade history prefix;
 // it is never sent, installed as a summary, or accepted from an HTTP header.
-func WithModelLabel(ctx context.Context, note string, legacyBody []byte) context.Context {
-	return context.WithValue(ctx, modelLabelKey{}, modelLabelContext{note: note, legacyBody: legacyBody})
+func WithModelLabel(ctx context.Context, note string, legacyBody []byte, legacyActive bool) context.Context {
+	return context.WithValue(ctx, modelLabelKey{}, modelLabelContext{note: note, legacyBody: legacyBody, legacyActive: legacyActive})
 }
 
 func (s *Server) planModelLabelTurn(r *http.Request, p *projectSession, v chatRequest) (turnPlan, error) {
-	plan := planTurn(p, v.Messages)
 	label, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext)
-	if !owned || !plan.reset || p.LabelHistoryVersion != 0 {
-		return plan, nil
+	if !owned {
+		return planTurn(p, v.Messages), nil
 	}
+	current := *p
+	if p.LabelHistoryVersion == 2 {
+		current.Sent, current.Systems = p.ClientSent, p.ClientSystems
+	}
+	plan := planTurn(&current, v.Messages)
 	// Older releases hashed the injected system note. Only an exact legacy
 	// prefix proves the same client history; never ignore arbitrary system edits.
 	var legacy chatRequest
@@ -38,13 +43,27 @@ func (s *Server) planModelLabelTurn(r *http.Request, p *projectSession, v chatRe
 	default:
 		legacy, err = s.normalizeChat(label.legacyBody)
 	}
-	if err == nil {
-		old := planTurn(p, legacy.Messages)
-		if !old.reset && old.mode == "tail" {
-			plan.send, plan.reset, plan.mode, plan.reason = old.send, false, "tail", ""
-			plan.systems = systemHashes(v.Messages, nil)
-			return plan, nil
-		}
+	if err != nil {
+		return turnPlan{}, err
+	}
+	rollbackMessages := v.Messages
+	if label.legacyActive {
+		rollbackMessages = legacy.Messages
+	}
+	plan.legacySent = hashes(rollbackMessages)
+	previousSystems := p.Systems
+	if plan.reset {
+		previousSystems = nil
+	}
+	plan.legacySystems = systemHashes(rollbackMessages, previousSystems)
+	if !plan.reset || p.LabelHistoryVersion != 0 {
+		return plan, nil
+	}
+	old := planTurn(p, legacy.Messages)
+	if !old.reset && old.mode == "tail" {
+		plan.send, plan.reset, plan.mode, plan.reason = old.send, false, "tail", ""
+		plan.systems = systemHashes(v.Messages, nil)
+		return plan, nil
 	}
 	// A changed custom template cannot be recovered from a one-way old hash.
 	// Preserve the Project rather than archiving it or guessing lost history.
