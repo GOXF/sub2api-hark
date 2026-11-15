@@ -95,7 +95,10 @@ func (s *Server) EmbeddedHandler() http.Handler {
 		if a.Name == "" {
 			a.Name = a.ID
 		}
-		s.embed.put(a)
+		// Read-only result recovery must not refresh the account registry.
+		if !strings.HasPrefix(r.URL.Path, "/v1/sessions/") || !strings.HasSuffix(r.URL.Path, "/result") {
+			s.embed.put(a)
+		}
 		h.ServeHTTP(w, r)
 	})
 }

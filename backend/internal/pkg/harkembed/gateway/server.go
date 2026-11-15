@@ -351,6 +351,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/messages", s.trackRequest(s.messages))
 	m.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	m.HandleFunc("POST /v1/sessions/{id}/end", s.endSession)
+	m.HandleFunc("GET /v1/sessions/{id}/result", s.sessionResult)
 	m.HandleFunc("GET /v1/media/{name}", s.serveMedia)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, map[string]any{"ok": true, "service": "hark2api"})
