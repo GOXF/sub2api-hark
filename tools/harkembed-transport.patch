@@ -1,3 +1,31 @@
+diff --git a/accepted_turn_guard_test.go b/accepted_turn_guard_test.go
+new file mode 100644
+index 0000000..d1c8701
+--- /dev/null
++++ b/accepted_turn_guard_test.go
+@@ -0,0 +1,22 @@
++package gateway
++
++import (
++	"context"
++	"net/http"
++	"testing"
++)
++
++func TestAcceptedTurnFailureSurvivesContextCancellation(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	for _, code := range []string{"upstream_turn_interrupted", "session_turn_pending", "session_account_conflict"} {
++		status, got, _ := turnError(ctx, &upstreamError{http.StatusConflict, code, "preserved"})
++		if status != http.StatusConflict || got != code {
++			t.Fatalf("accepted/request-bound failure became retryable: %d %s", status, got)
++		}
++	}
++	status, code, _ := turnError(ctx, &upstreamError{502, "upstream_error", "before acceptance"})
++	if status != 504 || code != "upstream_timeout" {
++		t.Fatal("ordinary pre-acceptance timeout classification changed")
++	}
++}
 diff --git a/attachments.go b/attachments.go
 index b411fca..46db41b 100644
 --- a/attachments.go
@@ -173,25 +201,37 @@ index 0000000..547f2f9
 +	return conn, nil
 +}
 diff --git a/chat.go b/chat.go
-index a1e0482..7f9824c 100644
+index a1e0482..8b7b397 100644
 --- a/chat.go
 +++ b/chat.go
-@@ -55 +55,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -55 +55,11 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	plan := planTurn(p, v.Messages)
++	if p.PendingTurn != nil {
++		return &upstreamError{409, "session_turn_pending", "本会话已有已受理但尚未确认结束的请求；原 Project 和上下文已保留，未换号、未重发。请先恢复原请求的结果"}
++	}
++	if s.otherAcceptedProject(r, p, v.SessionID) {
++		return &upstreamError{409, "session_account_conflict", "该会话已有另一个账号的已受理上下文；当前空 Project 未发送，原会话已保留。请显式恢复原账号续接"}
++	}
++
 +	plan, err := s.planModelLabelTurn(r, p, v)
 +	if err != nil {
 +		return err
 +	}
-@@ -73 +76,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -73 +83,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	text += toolPrompt(v.Tools, v.ToolChoice)
 +	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" {
 +		text = "SYSTEM: " + label.note + "\n\n" + text
 +	}
 +	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
-@@ -147 +153 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -147 +160,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
-+	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
-@@ -149,0 +156,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
++	var pending pendingProjectTurn
++	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, acceptedTurn: func(expected, requestID string) {
++		pending.Expected, pending.RequestID = expected, requestID
++	}, accepted: func() {
+@@ -148,0 +165 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
++		p.PendingTurn = &pending
+@@ -149,0 +167,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 +		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
 +			p.ClientSent, p.ClientSystems = plan.sent, plan.systems
 +			p.Sent, p.Systems = plan.legacySent, plan.legacySystems
@@ -199,12 +239,33 @@ index a1e0482..7f9824c 100644
 +		} else {
 +			p.LabelHistoryVersion, p.ClientSent, p.ClientSystems = 0, nil, nil
 +		}
-@@ -204 +217 @@ func (s *Server) recordSuccess(accountID, outcome string) {
+@@ -158,0 +183,17 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
++		if p.PendingTurn != nil {
++			_, code, message := turnError(ctx, err)
++			if code != "upstream_budget_exhausted" && code != "upstream_generation_failed" {
++				return &upstreamError{409, "upstream_turn_interrupted", "Hark 已受理本次请求，但结果读取中断（" + code + ": " + message + "）；原 Project、受理关联和上下文已保留，未自动换号或重发"}
++			}
++			// A native terminal failure is known, unlike an interrupted poll.
++			s.projectMu.Lock()
++			p.PendingTurn = nil
++			s.projectMu.Unlock()
++			s.persistProjects()
++		}
++		return err
++	}
++	s.projectMu.Lock()
++	p.PendingTurn = nil
++	s.projectMu.Unlock()
++	if err := s.persistProjects(); err != nil {
+@@ -204 +245 @@ func (s *Server) recordSuccess(accountID, outcome string) {
 -		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
 +		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
-@@ -316,0 +330 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -262 +303 @@ func turnError(ctx context.Context, err error) (int, string, string) {
+-	if ctx.Err() != nil {
++	if ctx.Err() != nil && code != "upstream_turn_interrupted" && code != "session_turn_pending" && code != "session_account_conflict" {
+@@ -316,0 +358 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	compact := isCheckpointCompaction(v)
-@@ -318,0 +333,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -318,0 +361,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && !requiresClientTool(v) {
 +		// A checkpoint summarizes existing task context; it must not install an
 +		// execution protocol or forward raw native tools through forward-extra.
@@ -213,10 +274,10 @@ index a1e0482..7f9824c 100644
 +			delete(v.extra, field)
 +		}
 +	}
-@@ -319,0 +342,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -319,0 +370,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	case compact:
 +		toolsNote = "摘要请求不携带执行工具协议"
-@@ -345,0 +370,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -345,0 +398,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && requiresClientTool(v) {
 +		s.turnFailed(w, r, ctx, &upstreamError{400, "compaction_tool_choice_conflict", "摘要请求与必需工具调用冲突；未发送上游，请分别提交摘要请求和执行请求"}, format)
 +		return
@@ -225,25 +286,25 @@ index a1e0482..7f9824c 100644
 +		s.turnFailed(w, r, ctx, err, format)
 +		return
 +	}
-@@ -347,0 +380,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -347,0 +408,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if err == nil {
 +			err = declinedTurnFailure(compact, res)
 +			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		}
-@@ -352,0 +389,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -352,0 +417,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 +			s.turnFailed(w, r, ctx, err, format)
 +			return
 +		}
-@@ -363,0 +405 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -363,0 +433 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	var latestStatus turnStatus
-@@ -399 +441,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -399 +469,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 +			// A required-tool turn is validated before releasing assistant text.
 +			// Keepalives still flow, and ordinary auto/none turns stay incremental.
 +			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -416,0 +461,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -416,0 +489,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
 +		hooks.status = func(status turnStatus) {
 +			mu.Lock()
@@ -255,7 +316,7 @@ index a1e0482..7f9824c 100644
 +			emit("hark.status", status)
 +		}
 +	}
-@@ -419,0 +475,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -419,0 +503,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +	if err == nil {
 +		err = declinedTurnFailure(compact, res)
@@ -264,15 +325,15 @@ index a1e0482..7f9824c 100644
 +		s.applyToolCalls(v, res)
 +		err = validateClientToolResult(v, res.ToolCalls)
 +	}
-@@ -425,0 +489,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -425,0 +517,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 +			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 +			latestStatus.Sequence++
 +			emit("hark.status", latestStatus)
 +		}
-@@ -437 +504,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -437 +532,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -	s.applyToolCalls(v, res)
-@@ -452,0 +520,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -452,0 +548,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 +		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
 +		latestStatus.Sequence++
@@ -547,7 +608,7 @@ index 0000000..5ce9af3
 +	}
 +}
 diff --git a/direct_chat.go b/direct_chat.go
-index 344ea88..3b930c1 100644
+index 344ea88..7e8a40b 100644
 --- a/direct_chat.go
 +++ b/direct_chat.go
 @@ -135,2 +135,4 @@ type harkMessage struct {
@@ -584,11 +645,19 @@ index 344ea88..3b930c1 100644
 -		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
 -			return projectReply{Text: notice, Outcome: "declined"}, nil
 -		}
-@@ -428 +448,2 @@ type turnHooks struct {
+@@ -426 +446,2 @@ type turnHooks struct {
+-	accepted func()
++	accepted     func()
++	acceptedTurn func(expected, requestID string)
+@@ -428 +449,2 @@ type turnHooks struct {
 -	poll func(partial string)
 +	poll   func(partial string)
 +	status func(turnStatus)
-@@ -452,0 +474,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -449,0 +472,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
++	if hooks.acceptedTurn != nil {
++		hooks.acceptedTurn(expected, requestID)
++	}
+@@ -452,0 +478,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +	var statusTracker *turnStatusTracker
 +	var statusDone chan struct{}
 +	if hooks.status != nil {
@@ -598,11 +667,11 @@ index 344ea88..3b930c1 100644
 +		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
 +		defer func() { stopStatus(); <-statusDone }()
 +	}
-@@ -457,0 +488,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -457,0 +492,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +		if statusTracker != nil {
 +			statusTracker.history(messages)
 +		}
-@@ -462,0 +496,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -462,0 +500,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +			if statusTracker != nil {
 +				// A job can finish just before the request-level awaiting-person
 +				// patch arrives. Give the existing feed a bounded drain, not a
@@ -903,21 +972,55 @@ index 0000000..99d8c26
 +	}
 +}
 diff --git a/project_sessions.go b/project_sessions.go
-index 8872c98..1ac166a 100644
+index 8872c98..6d1196c 100644
 --- a/project_sessions.go
 +++ b/project_sessions.go
-@@ -31 +31,6 @@ type projectSession struct {
+@@ -31 +31,37 @@ type projectSession struct {
 -	Busy           bool      `json:"-"`
 +	// Version 2 keeps the old sent/systems reader compatible with rollback,
 +	// while the new planner uses the unmodified client-history fingerprints.
-+	LabelHistoryVersion int      `json:"label_history_version,omitempty"`
-+	ClientSent          []string `json:"client_sent,omitempty"`
-+	ClientSystems       []string `json:"client_systems,omitempty"`
-+	Busy                bool     `json:"-"`
-@@ -171,0 +177,3 @@ type turnPlan struct {
++	LabelHistoryVersion int                 `json:"label_history_version,omitempty"`
++	ClientSent          []string            `json:"client_sent,omitempty"`
++	ClientSystems       []string            `json:"client_systems,omitempty"`
++	PendingTurn         *pendingProjectTurn `json:"pending_turn,omitempty"`
++	Busy                bool                `json:"-"`
++}
++
++type pendingProjectTurn struct {
++	Expected  string `json:"expected"`
++	RequestID string `json:"request_id"`
++}
++
++func unsubmittedProject(p *projectSession) bool {
++	return p != nil && p.Turns == 0 && p.LabelHistoryVersion == 0 && p.PendingTurn == nil &&
++		len(p.Sent) == 0 && len(p.Systems) == 0 && len(p.ClientSent) == 0 && len(p.ClientSystems) == 0
++}
++
++// An empty failed-attempt Project must not accept a replay of another
++// account's already accepted session. Do not migrate or overwrite that owner.
++func (s *Server) otherAcceptedProject(r *http.Request, p *projectSession, sessionID string) bool {
++	if _, ok := embeddedAccount(r.Context()); !ok || sessionID == "" || !unsubmittedProject(p) {
++		return false
++	}
++	s.projectMu.Lock()
++	defer s.projectMu.Unlock()
++	for _, old := range s.projects {
++		if old == p || old.Archived || old.ConversationID == "" || old.Turns == 0 || old.AccountID == "" {
++			continue
++		}
++		key := sha256.Sum256([]byte("embed:" + old.AccountID + "\x00" + sessionID))
++		if old.MappingID == hex.EncodeToString(key[:]) {
++			return true
++		}
++	}
++	return false
+@@ -171,0 +208,3 @@ type turnPlan struct {
 +	// Legacy-shaped cursors are stored, not sent, for old binary readers.
 +	legacySent    []string
 +	legacySystems []string
+@@ -220 +259 @@ func planTurn(p *projectSession, messages []chatMessage) turnPlan {
+-	if p == nil || p.ConversationID == "" {
++	if p == nil || p.ConversationID == "" || unsubmittedProject(p) {
 diff --git a/proxy_pool.go b/proxy_pool.go
 index bde38c0..a292d77 100644
 --- a/proxy_pool.go

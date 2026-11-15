@@ -15,6 +15,10 @@ func harkAcceptedTurnFailure(body []byte) (int, error) {
 		code := gjson.GetBytes(body, path).String()
 		status := http.StatusUnprocessableEntity
 		switch code {
+		case "upstream_turn_interrupted":
+			status = http.StatusConflict
+		case "upstream_generation_failed":
+			status = http.StatusBadGateway
 		case "upstream_budget_exhausted":
 			status = http.StatusTooManyRequests
 		case "tool_call_missing", "tool_call_mismatch", "upstream_compaction_declined", "upstream_declined":
@@ -36,7 +40,7 @@ func isHarkAcceptedTurnFailure(body []byte) bool {
 func isHarkRequestContextFailure(body []byte) bool {
 	for _, path := range []string{"error.code", "response.error.code"} {
 		switch gjson.GetBytes(body, path).String() {
-		case "session_label_history_mismatch", "compaction_tool_choice_conflict":
+		case "session_label_history_mismatch", "compaction_tool_choice_conflict", "session_turn_pending", "session_account_conflict":
 			return true
 		}
 	}

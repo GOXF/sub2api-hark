@@ -52,6 +52,13 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}
 	defer s.releaseProject(p)
 
+	if p.PendingTurn != nil {
+		return &upstreamError{409, "session_turn_pending", "本会话已有已受理但尚未确认结束的请求；原 Project 和上下文已保留，未换号、未重发。请先恢复原请求的结果"}
+	}
+	if s.otherAcceptedProject(r, p, v.SessionID) {
+		return &upstreamError{409, "session_account_conflict", "该会话已有另一个账号的已受理上下文；当前空 Project 未发送，原会话已保留。请显式恢复原账号续接"}
+	}
+
 	plan, err := s.planModelLabelTurn(r, p, v)
 	if err != nil {
 		return err
@@ -150,8 +157,12 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}
 
 	payload := s.nativeProjectPayload(v, s.zoneFor(account), p.ConversationID, text, attachments, account.UserID)
-	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
+	var pending pendingProjectTurn
+	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, acceptedTurn: func(expected, requestID string) {
+		pending.Expected, pending.RequestID = expected, requestID
+	}, accepted: func() {
 		s.projectMu.Lock()
+		p.PendingTurn = &pending
 		p.Sent, p.Systems = plan.sent, plan.systems
 		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
 			p.ClientSent, p.ClientSystems = plan.sent, plan.systems
@@ -169,6 +180,23 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}}
 	reply, err := s.sendProjectPayload(ctx, account.Cookie, p.ConversationID, payload, s.pollInterval, wrapped)
 	if err != nil {
+		if p.PendingTurn != nil {
+			_, code, message := turnError(ctx, err)
+			if code != "upstream_budget_exhausted" && code != "upstream_generation_failed" {
+				return &upstreamError{409, "upstream_turn_interrupted", "Hark 已受理本次请求，但结果读取中断（" + code + ": " + message + "）；原 Project、受理关联和上下文已保留，未自动换号或重发"}
+			}
+			// A native terminal failure is known, unlike an interrupted poll.
+			s.projectMu.Lock()
+			p.PendingTurn = nil
+			s.projectMu.Unlock()
+			s.persistProjects()
+		}
+		return err
+	}
+	s.projectMu.Lock()
+	p.PendingTurn = nil
+	s.projectMu.Unlock()
+	if err := s.persistProjects(); err != nil {
 		return err
 	}
 	res.Text, res.Outcome = reply.Text, reply.Outcome
@@ -272,7 +300,7 @@ func turnError(ctx context.Context, err error) (int, string, string) {
 	case errors.As(err, &ci):
 		status, code, message = 400, ci.code, ci.message
 	}
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && code != "upstream_turn_interrupted" && code != "session_turn_pending" && code != "session_account_conflict" {
 		status, code, message = 504, "upstream_timeout", "等待 Hark 关联且完成的回复超时；请求可能已受理，请勿自动重发"
 	}
 	if _, ok := embeddedAccount(ctx); ok {
