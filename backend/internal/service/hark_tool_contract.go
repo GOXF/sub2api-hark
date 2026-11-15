@@ -31,6 +31,30 @@ func isHarkAcceptedTurnFailure(body []byte) bool {
 	return failure != nil
 }
 
+// These request-scoped failures happen before submission. Another credential
+// cannot repair retained history or contradictory summary/tool requirements.
+func isHarkRequestContextFailure(body []byte) bool {
+	for _, path := range []string{"error.code", "response.error.code"} {
+		switch gjson.GetBytes(body, path).String() {
+		case "session_label_history_mismatch", "compaction_tool_choice_conflict":
+			return true
+		}
+	}
+	return false
+}
+
+func writeHarkRequestContextError(c *gin.Context, status int, body []byte) error {
+	code := gjson.GetBytes(body, "error.code").String()
+	if code == "" {
+		code = gjson.GetBytes(body, "response.error.code").String()
+	}
+	message := extractUpstreamErrorMessage(body)
+	setOpsUpstreamError(c, status, message, "")
+	MarkResponseCommitted(c)
+	c.JSON(status, gin.H{"type": "error", "error": gin.H{"type": "invalid_request_error", "code": code, "message": message}})
+	return fmt.Errorf("hark request context %s: %s", code, message)
+}
+
 func writeHarkAcceptedTurnError(c *gin.Context, body []byte) error {
 	if isHarkBudgetExhausted(body) {
 		return writeHarkBudgetError(c, body)

@@ -1,13 +1,15 @@
 diff --git a/attachments.go b/attachments.go
+index b411fca..46db41b 100644
 --- a/attachments.go
 +++ b/attachments.go
-@@ -313 +313,3 @@
+@@ -313 +313,3 @@ func (s *Server) uploadFile(ctx context.Context, cookie, cid string, f inputFile
 -	resp, err := s.clientFor(cookie, 0, false).Do(req)
 +	client := s.uploadClientFor(cookie)
 +	defer client.CloseIdleConnections()
 +	resp, err := client.Do(req)
 diff --git a/browser_tls.go b/browser_tls.go
 new file mode 100644
+index 0000000..547f2f9
 --- /dev/null
 +++ b/browser_tls.go
 @@ -0,0 +1,159 @@
@@ -171,43 +173,77 @@ new file mode 100644
 +	return conn, nil
 +}
 diff --git a/chat.go b/chat.go
+index a1e0482..7f9824c 100644
 --- a/chat.go
 +++ b/chat.go
-@@ -73 +73 @@
+@@ -55 +55,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+-	plan := planTurn(p, v.Messages)
++	plan, err := s.planModelLabelTurn(r, p, v)
++	if err != nil {
++		return err
++	}
+@@ -73 +76,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	text += toolPrompt(v.Tools, v.ToolChoice)
++	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" {
++		text = "SYSTEM: " + label.note + "\n\n" + text
++	}
 +	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
-@@ -147 +147 @@
+@@ -147 +153 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
 +	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, accepted: func() {
-@@ -204 +204 @@
+@@ -149,0 +156,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
++		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
++			p.ClientSent, p.ClientSystems = plan.sent, plan.systems
++			p.Sent, p.Systems = plan.legacySent, plan.legacySystems
++			p.LabelHistoryVersion = 2
++		} else {
++			p.LabelHistoryVersion, p.ClientSent, p.ClientSystems = 0, nil, nil
++		}
+@@ -204 +217 @@ func (s *Server) recordSuccess(accountID, outcome string) {
 -		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
 +		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
-@@ -316,0 +317 @@
+@@ -316,0 +330 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	compact := isCheckpointCompaction(v)
-@@ -345,0 +347,4 @@
+@@ -318,0 +333,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
++	if compact && !requiresClientTool(v) {
++		// A checkpoint summarizes existing task context; it must not install an
++		// execution protocol or forward raw native tools through forward-extra.
++		v.Tools, v.ToolChoice = nil, "none"
++		for _, field := range []string{"tools", "additional_tools", "tool_choice", "parallel_tool_calls"} {
++			delete(v.extra, field)
++		}
++	}
+@@ -319,0 +342,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
++	case compact:
++		toolsNote = "摘要请求不携带执行工具协议"
+@@ -345,0 +370,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
++	if compact && requiresClientTool(v) {
++		s.turnFailed(w, r, ctx, &upstreamError{400, "compaction_tool_choice_conflict", "摘要请求与必需工具调用冲突；未发送上游，请分别提交摘要请求和执行请求"}, format)
++		return
++	}
 +	if err := validateClientToolRequest(v, s.forwardExtra); err != nil {
 +		s.turnFailed(w, r, ctx, err, format)
 +		return
 +	}
-@@ -347,0 +353,4 @@
+@@ -347,0 +380,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if err == nil {
 +			err = declinedTurnFailure(compact, res)
 +			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		}
-@@ -352,0 +362,5 @@
+@@ -352,0 +389,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 +			s.turnFailed(w, r, ctx, err, format)
 +			return
 +		}
-@@ -363,0 +378 @@
+@@ -363,0 +405 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	var latestStatus turnStatus
-@@ -399 +414,3 @@
+@@ -399 +441,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 +			// A required-tool turn is validated before releasing assistant text.
 +			// Keepalives still flow, and ordinary auto/none turns stay incremental.
 +			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -416,0 +434,11 @@
+@@ -416,0 +461,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
 +		hooks.status = func(status turnStatus) {
 +			mu.Lock()
@@ -219,7 +255,7 @@ diff --git a/chat.go b/chat.go
 +			emit("hark.status", status)
 +		}
 +	}
-@@ -419,0 +448,8 @@
+@@ -419,0 +475,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +	if err == nil {
 +		err = declinedTurnFailure(compact, res)
@@ -228,45 +264,47 @@ diff --git a/chat.go b/chat.go
 +		s.applyToolCalls(v, res)
 +		err = validateClientToolResult(v, res.ToolCalls)
 +	}
-@@ -425,0 +462,5 @@
+@@ -425,0 +489,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 +			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 +			latestStatus.Sequence++
 +			emit("hark.status", latestStatus)
 +		}
-@@ -437 +477,0 @@
+@@ -437 +504,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -	s.applyToolCalls(v, res)
-@@ -451,0 +492,5 @@
-+	}
+@@ -452,0 +520,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 +		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
 +		latestStatus.Sequence++
 +		emit("hark.status", latestStatus)
++	}
 diff --git a/chat_input.go b/chat_input.go
+index d215a77..6f0c28d 100644
 --- a/chat_input.go
 +++ b/chat_input.go
-@@ -63 +63,2 @@
+@@ -63 +63,2 @@ type chatRequest struct {
 -	Bridge bool `json:"hark_bridge,omitempty"`
 +	Bridge       bool `json:"hark_bridge,omitempty"`
 +	StatusEvents bool `json:"hark_status,omitempty"`
-@@ -66,0 +68,2 @@
+@@ -66,0 +68,2 @@ type chatRequest struct {
 +	// Preserve an explicit name even when it is a mode word (auto/none/required).
 +	ToolChoiceNamed bool `json:"-"`
-@@ -296,0 +300,5 @@
+@@ -296,0 +300,5 @@ func parseEnvelope(object map[string]json.RawMessage, v *chatRequest) error {
 +	if raw, ok := object["hark_status"]; ok {
 +		if json.Unmarshal(raw, &v.StatusEvents) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 +			return inputError("invalid_status_events", "hark_status must be boolean")
 +		}
 +	}
-@@ -303 +311,2 @@
+@@ -303 +311,2 @@ func parseEnvelope(object map[string]json.RawMessage, v *chatRequest) error {
 -	if v.ToolChoice == "none" {
 +	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
 +	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
-@@ -329 +338 @@
+@@ -329 +338 @@ func extraFields(object map[string]json.RawMessage) map[string]json.RawMessage {
 -		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "input", "instructions", "user":
 +		case "model", "stream", "messages", "session_id", "session_end", "hark_bridge", "hark_status", "input", "instructions", "user":
 diff --git a/compaction_gate.go b/compaction_gate.go
 new file mode 100644
+index 0000000..5232e8d
 --- /dev/null
 +++ b/compaction_gate.go
 @@ -0,0 +1,41 @@
@@ -313,6 +351,7 @@ new file mode 100644
 +}
 diff --git a/compaction_gate_test.go b/compaction_gate_test.go
 new file mode 100644
+index 0000000..5b7295b
 --- /dev/null
 +++ b/compaction_gate_test.go
 @@ -0,0 +1,30 @@
@@ -348,6 +387,7 @@ new file mode 100644
 +}
 diff --git a/declined.go b/declined.go
 new file mode 100644
+index 0000000..4dba8e2
 --- /dev/null
 +++ b/declined.go
 @@ -0,0 +1,42 @@
@@ -395,6 +435,7 @@ new file mode 100644
 +}
 diff --git a/declined_outcome_test.go b/declined_outcome_test.go
 new file mode 100644
+index 0000000..5ce9af3
 --- /dev/null
 +++ b/declined_outcome_test.go
 @@ -0,0 +1,86 @@
@@ -485,16 +526,17 @@ new file mode 100644
 +	}
 +}
 diff --git a/direct_chat.go b/direct_chat.go
+index 344ea88..3b930c1 100644
 --- a/direct_chat.go
 +++ b/direct_chat.go
-@@ -135,2 +135,4 @@
+@@ -135,2 +135,4 @@ type harkMessage struct {
 -	Onboarding  json.RawMessage `json:"onboarding"`
 -	Attachments []harkFile      `json:"attachments"`
 +	Onboarding  json.RawMessage  `json:"onboarding"`
 +	Narration   *statusNarration `json:"narration"`
 +	InputNeeded bool             `json:"inputNeeded"`
 +	Attachments []harkFile       `json:"attachments"`
-@@ -300,0 +303,12 @@
+@@ -300,0 +303,12 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 +		// A native, turn-bound refusal takes precedence over explanatory text.
 +		// Keep both original parts; never replace a refusal with a success body.
 +		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
@@ -507,7 +549,7 @@ diff --git a/direct_chat.go b/direct_chat.go
 +			}
 +			return projectReply{Text: strings.Join(parts, "\n\n"), Outcome: "declined", Attachments: files}, nil
 +		}
-@@ -301,0 +316,9 @@
+@@ -301,0 +316,9 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 +			// Plain-text refusals can accompany completed jobs. Only classify an
 +			// otherwise empty result with one evidenced, turn-bound text bubble.
 +			if len(parts) == 1 && len(files) == 0 {
@@ -517,15 +559,15 @@ diff --git a/direct_chat.go b/direct_chat.go
 +					}
 +				}
 +			}
-@@ -303,3 +325,0 @@
--		}
+@@ -304,3 +326,0 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 -		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
 -			return projectReply{Text: notice, Outcome: "declined"}, nil
-@@ -428 +448,2 @@
+-		}
+@@ -428 +448,2 @@ type turnHooks struct {
 -	poll func(partial string)
 +	poll   func(partial string)
 +	status func(turnStatus)
-@@ -452,0 +474,9 @@
+@@ -452,0 +474,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +	var statusTracker *turnStatusTracker
 +	var statusDone chan struct{}
 +	if hooks.status != nil {
@@ -535,11 +577,11 @@ diff --git a/direct_chat.go b/direct_chat.go
 +		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
 +		defer func() { stopStatus(); <-statusDone }()
 +	}
-@@ -457,0 +488,3 @@
+@@ -457,0 +488,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +		if statusTracker != nil {
 +			statusTracker.history(messages)
 +		}
-@@ -462,0 +496,16 @@
+@@ -462,0 +496,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +			if statusTracker != nil {
 +				// A job can finish just before the request-level awaiting-person
 +				// patch arrives. Give the existing feed a bounded drain, not a
@@ -557,17 +599,96 @@ diff --git a/direct_chat.go b/direct_chat.go
 +				}
 +			}
 diff --git a/messages.go b/messages.go
+index 6e1e335..6dde968 100644
 --- a/messages.go
 +++ b/messages.go
-@@ -337 +337 @@
+@@ -337 +337 @@ func (s *Server) normalizeMessages(b []byte) (chatRequest, string, error) {
 -	for _, k := range []string{"stream", "session_id", "session_end", "hark_bridge"} {
 +	for _, k := range []string{"stream", "session_id", "session_end", "hark_bridge", "hark_status"} {
-@@ -350 +350,2 @@
+@@ -350 +350,2 @@ func (s *Server) normalizeMessages(b []byte) (chatRequest, string, error) {
 -	if v.ToolChoice == "none" {
 +	v.ToolChoiceNamed = isNamedToolChoice(object["tool_choice"])
 +	if v.ToolChoice == "none" && !v.ToolChoiceNamed {
+diff --git a/model_label.go b/model_label.go
+new file mode 100644
+index 0000000..005afe0
+--- /dev/null
++++ b/model_label.go
+@@ -0,0 +1,71 @@
++package gateway
++
++import (
++	"context"
++	"net/http"
++	"strings"
++)
++
++type modelLabelKey struct{}
++
++type modelLabelContext struct {
++	note         string
++	legacyBody   []byte
++	legacyActive bool
++}
++
++// WithModelLabel carries gateway-owned instructions separately from client
++// history. legacyBody is used only to recognize a pre-upgrade history prefix;
++// it is never sent, installed as a summary, or accepted from an HTTP header.
++func WithModelLabel(ctx context.Context, note string, legacyBody []byte, legacyActive bool) context.Context {
++	return context.WithValue(ctx, modelLabelKey{}, modelLabelContext{note: note, legacyBody: legacyBody, legacyActive: legacyActive})
++}
++
++func (s *Server) planModelLabelTurn(r *http.Request, p *projectSession, v chatRequest) (turnPlan, error) {
++	label, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext)
++	if !owned {
++		return planTurn(p, v.Messages), nil
++	}
++	current := *p
++	if p.LabelHistoryVersion == 2 {
++		current.Sent, current.Systems = p.ClientSent, p.ClientSystems
++	}
++	plan := planTurn(&current, v.Messages)
++	// Older releases hashed the injected system note. Only an exact legacy
++	// prefix proves the same client history; never ignore arbitrary system edits.
++	var legacy chatRequest
++	var err error
++	switch {
++	case strings.HasSuffix(r.URL.Path, "/responses"):
++		legacy, err = s.normalizeResponses(label.legacyBody)
++	case strings.HasSuffix(r.URL.Path, "/messages"):
++		legacy, _, err = s.normalizeMessages(label.legacyBody)
++	default:
++		legacy, err = s.normalizeChat(label.legacyBody)
++	}
++	if err != nil {
++		return turnPlan{}, err
++	}
++	rollbackMessages := v.Messages
++	if label.legacyActive {
++		rollbackMessages = legacy.Messages
++	}
++	plan.legacySent = hashes(rollbackMessages)
++	previousSystems := p.Systems
++	if plan.reset {
++		previousSystems = nil
++	}
++	plan.legacySystems = systemHashes(rollbackMessages, previousSystems)
++	if !plan.reset || p.LabelHistoryVersion != 0 {
++		return plan, nil
++	}
++	old := planTurn(p, legacy.Messages)
++	if !old.reset && old.mode == "tail" {
++		plan.send, plan.reset, plan.mode, plan.reason = old.send, false, "tail", ""
++		plan.systems = systemHashes(v.Messages, nil)
++		return plan, nil
++	}
++	// A changed custom template cannot be recovered from a one-way old hash.
++	// Preserve the Project rather than archiving it or guessing lost history.
++	return turnPlan{}, &upstreamError{http.StatusConflict, "session_label_history_mismatch", "无法核验旧会话的身份说明历史；原 Project 和上下文已保留，未归档、未重放。请核对原模板后显式继续"}
++}
 diff --git a/observed_refusals_test.go b/observed_refusals_test.go
 new file mode 100644
+index 0000000..069a92b
 --- /dev/null
 +++ b/observed_refusals_test.go
 @@ -0,0 +1,120 @@
@@ -693,6 +814,7 @@ new file mode 100644
 +}
 diff --git a/ordinary_refusal_test.go b/ordinary_refusal_test.go
 new file mode 100644
+index 0000000..52d3973
 --- /dev/null
 +++ b/ordinary_refusal_test.go
 @@ -0,0 +1,58 @@
@@ -754,25 +876,44 @@ new file mode 100644
 +		}
 +	}
 +}
+diff --git a/project_sessions.go b/project_sessions.go
+index 8872c98..1ac166a 100644
+--- a/project_sessions.go
++++ b/project_sessions.go
+@@ -31 +31,6 @@ type projectSession struct {
+-	Busy           bool      `json:"-"`
++	// Version 2 keeps the old sent/systems reader compatible with rollback,
++	// while the new planner uses the unmodified client-history fingerprints.
++	LabelHistoryVersion int      `json:"label_history_version,omitempty"`
++	ClientSent          []string `json:"client_sent,omitempty"`
++	ClientSystems       []string `json:"client_systems,omitempty"`
++	Busy                bool     `json:"-"`
+@@ -171,0 +177,3 @@ type turnPlan struct {
++	// Legacy-shaped cursors are stored, not sent, for old binary readers.
++	legacySent    []string
++	legacySystems []string
 diff --git a/proxy_pool.go b/proxy_pool.go
+index bde38c0..a292d77 100644
 --- a/proxy_pool.go
 +++ b/proxy_pool.go
-@@ -99,2 +99 @@
+@@ -99,2 +99 @@ func (s *Server) directTransport() http.RoundTripper {
 -	t := http.DefaultTransport.(*http.Transport).Clone()
 -	t.Proxy = nil
 +	t := browserTransport(nil)
 diff --git a/source.go b/source.go
+index 670fa24..82111fe 100644
 --- a/source.go
 +++ b/source.go
-@@ -97,2 +97 @@
+@@ -97,2 +97 @@ func (s *Server) transportForProxy(raw string) http.RoundTripper {
 -	t := http.DefaultTransport.(*http.Transport).Clone()
 -	t.Proxy = http.ProxyURL(u)
 +	t := browserTransport(u)
-@@ -146 +145 @@
+@@ -146 +145 @@ func (s *Server) transportFor(cookie string) http.RoundTripper {
 -	if direct {
 +	if direct || (proxy == "" && s.upstreamProxy == "") {
 diff --git a/storage_tls.go b/storage_tls.go
 new file mode 100644
+index 0000000..95afc4b
 --- /dev/null
 +++ b/storage_tls.go
 @@ -0,0 +1,26 @@
@@ -804,6 +945,7 @@ new file mode 100644
 +}
 diff --git a/storage_tls_test.go b/storage_tls_test.go
 new file mode 100644
+index 0000000..acc19e3
 --- /dev/null
 +++ b/storage_tls_test.go
 @@ -0,0 +1,121 @@
@@ -930,6 +1072,7 @@ new file mode 100644
 +}
 diff --git a/testdata/backend_refusal_history.json b/testdata/backend_refusal_history.json
 new file mode 100644
+index 0000000..19f516b
 --- /dev/null
 +++ b/testdata/backend_refusal_history.json
 @@ -0,0 +1,60 @@
@@ -995,6 +1138,7 @@ new file mode 100644
 +}
 diff --git a/testdata/observed_refusals_20261113.json b/testdata/observed_refusals_20261113.json
 new file mode 100644
+index 0000000..79a3719
 --- /dev/null
 +++ b/testdata/observed_refusals_20261113.json
 @@ -0,0 +1,292 @@
@@ -1292,6 +1436,7 @@ new file mode 100644
 +}
 diff --git a/testdata/refusal_event_20261114.json b/testdata/refusal_event_20261114.json
 new file mode 100644
+index 0000000..197fd8e
 --- /dev/null
 +++ b/testdata/refusal_event_20261114.json
 @@ -0,0 +1,58 @@
@@ -1355,6 +1500,7 @@ new file mode 100644
 +}
 diff --git a/testdata/turn_status_trace.json b/testdata/turn_status_trace.json
 new file mode 100644
+index 0000000..d4762be
 --- /dev/null
 +++ b/testdata/turn_status_trace.json
 @@ -0,0 +1,608 @@
@@ -1968,6 +2114,7 @@ new file mode 100644
 +]
 diff --git a/tool_contract.go b/tool_contract.go
 new file mode 100644
+index 0000000..54c50fa
 --- /dev/null
 +++ b/tool_contract.go
 @@ -0,0 +1,51 @@
@@ -2024,6 +2171,7 @@ new file mode 100644
 +}
 diff --git a/tool_contract_test.go b/tool_contract_test.go
 new file mode 100644
+index 0000000..6e062c2
 --- /dev/null
 +++ b/tool_contract_test.go
 @@ -0,0 +1,108 @@
@@ -2136,18 +2284,19 @@ new file mode 100644
 +	}
 +}
 diff --git a/tools.go b/tools.go
+index d5eda1d..0190db1 100644
 --- a/tools.go
 +++ b/tools.go
-@@ -145,0 +146,3 @@
+@@ -145,0 +146,3 @@ func parseToolChoice(raw json.RawMessage) string {
 +		if m.Type == "required" || m.Type == "auto" || m.Type == "none" {
 +			return m.Type
 +		}
-@@ -151,2 +154,2 @@
+@@ -151,2 +154,2 @@ func parseToolChoice(raw json.RawMessage) string {
 -func toolPrompt(tools []toolSpec, choice string) string {
 -	if len(tools) == 0 || choice == "none" {
 +func toolPrompt(tools []toolSpec, choice string, named bool) string {
 +	if len(tools) == 0 || choice == "none" && !named {
-@@ -177,3 +180,5 @@
+@@ -177,3 +180,5 @@ func toolPrompt(tools []toolSpec, choice string) string {
 -	switch choice {
 -	case "auto", "":
 -	case "required":
@@ -2156,9 +2305,7 @@ diff --git a/tools.go b/tools.go
 +		b.WriteString("- This turn you MUST call the tool \"" + choice + "\".\n")
 +	case choice == "auto" || choice == "":
 +	case choice == "required":
-@@ -208,0 +214,10 @@
-+}
-+
+@@ -210,0 +216,10 @@ func toolPrompt(tools []toolSpec, choice string) string {
 +func isNamedToolChoice(raw json.RawMessage) bool {
 +	var selection struct {
 +		Name     string `json:"name"`
@@ -2167,8 +2314,11 @@ diff --git a/tools.go b/tools.go
 +		} `json:"function"`
 +	}
 +	return json.Unmarshal(raw, &selection) == nil && (selection.Name != "" || selection.Function.Name != "")
++}
++
 diff --git a/turn_status.go b/turn_status.go
 new file mode 100644
+index 0000000..1655159
 --- /dev/null
 +++ b/turn_status.go
 @@ -0,0 +1,335 @@
@@ -2509,6 +2659,7 @@ new file mode 100644
 +}
 diff --git a/turn_status_stream_test.go b/turn_status_stream_test.go
 new file mode 100644
+index 0000000..009aa44
 --- /dev/null
 +++ b/turn_status_stream_test.go
 @@ -0,0 +1,359 @@
@@ -2873,6 +3024,7 @@ new file mode 100644
 +}
 diff --git a/turn_status_test.go b/turn_status_test.go
 new file mode 100644
+index 0000000..37ba8dd
 --- /dev/null
 +++ b/turn_status_test.go
 @@ -0,0 +1,90 @@
@@ -2968,6 +3120,7 @@ new file mode 100644
 +}
 diff --git a/unified_refusal_test.go b/unified_refusal_test.go
 new file mode 100644
+index 0000000..92d198f
 --- /dev/null
 +++ b/unified_refusal_test.go
 @@ -0,0 +1,162 @@

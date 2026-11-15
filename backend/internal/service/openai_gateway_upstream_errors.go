@@ -311,6 +311,9 @@ func (s *OpenAIGatewayService) shouldFailoverUpstreamError(statusCode int) bool 
 
 func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(account *Account, statusCode int, upstreamMsg string, upstreamBody []byte) bool {
 	if account.IsHark() {
+		if isHarkRequestContextFailure(upstreamBody) {
+			return false
+		}
 		if _, failure := harkAcceptedTurnFailure(upstreamBody); failure != nil {
 			return false
 		}
@@ -596,6 +599,9 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 ) (*OpenAIForwardResult, error) {
 	body := s.readUpstreamErrorBody(resp)
 	body = s.redactAgentIdentitySensitiveBody(ctx, account, body)
+	if account.IsHark() && isHarkRequestContextFailure(body) {
+		return nil, writeHarkRequestContextError(c, resp.StatusCode, body)
+	}
 	if account.IsHark() && isHarkAcceptedTurnFailure(body) {
 		return nil, writeHarkAcceptedTurnError(c, body)
 	}
@@ -850,6 +856,9 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 ) (*OpenAIForwardResult, error) {
 	body := s.readUpstreamErrorBody(resp)
 	body = s.redactAgentIdentitySensitiveBody(context.Background(), account, body)
+	if account.IsHark() && isHarkRequestContextFailure(body) {
+		return nil, writeHarkRequestContextError(c, resp.StatusCode, body)
+	}
 	if account.IsHark() && isHarkAcceptedTurnFailure(body) {
 		return nil, writeHarkAcceptedTurnError(c, body)
 	}

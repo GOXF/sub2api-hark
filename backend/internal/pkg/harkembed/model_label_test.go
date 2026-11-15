@@ -44,6 +44,21 @@ func readLabelled(t *testing.T, r *http.Request) string {
 	return string(b)
 }
 
+// Freeze the old wire shape used only to verify pre-upgrade history prefixes.
+// New forwarding is checked through Do and the captured local upstream body.
+func readLegacyLabelBody(t *testing.T, r *http.Request) string {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, ok := labelBody(body, labelFormatOf(r.URL.Path), modelLabelNote(labelTemplate(r), requestedModel(r)))
+	if !ok {
+		return string(body)
+	}
+	return string(out)
+}
+
 func assertNote(t *testing.T, text, model string) {
 	t.Helper()
 	for _, want := range []string{"当前会话的模型标识是 " + model, "自然回答", "answer naturally"} {
@@ -90,9 +105,9 @@ func TestClaudeMappedResponseStyle(t *testing.T) {
 	}
 }
 
-func TestInjectModelLabelChatCompletions(t *testing.T) {
+func TestLegacyLabelBodyChatCompletions(t *testing.T) {
 	body := `{"model":"gpt-5","messages":[{"role":"system","content":"You are GPT-5."},{"role":"developer","content":"d"},{"role":"user","content":"你是什么模型？"}],"stream":true}`
-	got := readLabelled(t, labelRequest(t, "/v1/chat/completions", body, "gpt-5"))
+	got := readLegacyLabelBody(t, labelRequest(t, "/v1/chat/completions", body, "gpt-5"))
 	msgs := gjson.Get(got, "messages").Array()
 	if len(msgs) != 4 {
 		t.Fatalf("messages: %s", got)
@@ -109,26 +124,26 @@ func TestInjectModelLabelChatCompletions(t *testing.T) {
 	}
 
 	// No system prompt: the note leads; empty history also works.
-	got = readLabelled(t, labelRequest(t, "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`, "claude-opus-5-5"))
+	got = readLegacyLabelBody(t, labelRequest(t, "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`, "claude-opus-5-5"))
 	msgs = gjson.Get(got, "messages").Array()
 	if len(msgs) != 2 || msgs[0].Get("role").Str != "system" || msgs[1].Get("role").Str != "user" {
 		t.Fatalf("no-system: %s", got)
 	}
-	got = readLabelled(t, labelRequest(t, "/v1/chat/completions", `{"messages":[]}`, "m"))
+	got = readLegacyLabelBody(t, labelRequest(t, "/v1/chat/completions", `{"messages":[]}`, "m"))
 	if n := len(gjson.Get(got, "messages").Array()); n != 1 {
 		t.Fatalf("empty: %s", got)
 	}
 
 	// Same input → same output (the gateway's turn hashes stay stable).
-	a := readLabelled(t, labelRequest(t, "/v1/chat/completions", body, "gpt-5"))
-	b := readLabelled(t, labelRequest(t, "/v1/chat/completions", body, "gpt-5"))
+	a := readLegacyLabelBody(t, labelRequest(t, "/v1/chat/completions", body, "gpt-5"))
+	b := readLegacyLabelBody(t, labelRequest(t, "/v1/chat/completions", body, "gpt-5"))
 	if a != b {
 		t.Fatal("not deterministic")
 	}
 }
 
-func TestInjectModelLabelResponses(t *testing.T) {
-	got := readLabelled(t, labelRequest(t, "/v1/responses", `{"model":"gpt-5.5","input":"hi","instructions":"be brief"}`, "gpt-5.5"))
+func TestLegacyLabelBodyResponses(t *testing.T) {
+	got := readLegacyLabelBody(t, labelRequest(t, "/v1/responses", `{"model":"gpt-5.5","input":"hi","instructions":"be brief"}`, "gpt-5.5"))
 	ins := gjson.Get(got, "instructions").Str
 	if !strings.HasPrefix(ins, "be brief\n\n") {
 		t.Fatalf("instructions: %q", ins)
@@ -138,35 +153,35 @@ func TestInjectModelLabelResponses(t *testing.T) {
 		t.Fatalf("input changed: %s", got)
 	}
 
-	got = readLabelled(t, labelRequest(t, "/v1/responses", `{"input":"hi"}`, "gpt-5.5"))
+	got = readLegacyLabelBody(t, labelRequest(t, "/v1/responses", `{"input":"hi"}`, "gpt-5.5"))
 	assertNote(t, gjson.Get(got, "instructions").Str, "gpt-5.5")
 
-	got = readLabelled(t, labelRequest(t, "/v1/responses", `{"input":"hi","instructions":null}`, "gpt-5.5"))
+	got = readLegacyLabelBody(t, labelRequest(t, "/v1/responses", `{"input":"hi","instructions":null}`, "gpt-5.5"))
 	assertNote(t, gjson.Get(got, "instructions").Str, "gpt-5.5")
 
 	// Non-string instructions are left for the gateway to reject.
 	body := `{"input":"hi","instructions":["x"]}`
-	if got = readLabelled(t, labelRequest(t, "/v1/responses", body, "gpt-5.5")); got != body {
+	if got = readLegacyLabelBody(t, labelRequest(t, "/v1/responses", body, "gpt-5.5")); got != body {
 		t.Fatalf("non-string instructions changed: %s", got)
 	}
 }
 
-func TestInjectModelLabelAnthropicMessages(t *testing.T) {
-	got := readLabelled(t, labelRequest(t, "/v1/messages", `{"model":"claude-opus-5-5","max_tokens":64,"system":"You are Claude.","messages":[{"role":"user","content":"hi"}]}`, "claude-opus-5-5"))
+func TestLegacyLabelBodyAnthropicMessages(t *testing.T) {
+	got := readLegacyLabelBody(t, labelRequest(t, "/v1/messages", `{"model":"claude-opus-5-5","max_tokens":64,"system":"You are Claude.","messages":[{"role":"user","content":"hi"}]}`, "claude-opus-5-5"))
 	sys := gjson.Get(got, "system").Str
 	if !strings.HasPrefix(sys, "You are Claude.\n\n") {
 		t.Fatalf("system: %q", sys)
 	}
 	assertNote(t, sys, "claude-opus-5-5")
 
-	got = readLabelled(t, labelRequest(t, "/v1/messages", `{"system":[{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`, "claude-opus-5-5"))
+	got = readLegacyLabelBody(t, labelRequest(t, "/v1/messages", `{"system":[{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`, "claude-opus-5-5"))
 	blocks := gjson.Get(got, "system").Array()
 	if len(blocks) != 2 || blocks[0].Get("text").Str != "You are Claude Code." || !blocks[0].Get("cache_control").Exists() || blocks[1].Get("type").Str != "text" {
 		t.Fatalf("system blocks: %s", got)
 	}
 	assertNote(t, blocks[1].Get("text").Str, "claude-opus-5-5")
 
-	got = readLabelled(t, labelRequest(t, "/v1/messages", `{"messages":[{"role":"user","content":"hi"}]}`, "claude-sonnet-5"))
+	got = readLegacyLabelBody(t, labelRequest(t, "/v1/messages", `{"messages":[{"role":"user","content":"hi"}]}`, "claude-sonnet-5"))
 	assertNote(t, gjson.Get(got, "system").Str, "claude-sonnet-5")
 }
 
@@ -186,8 +201,8 @@ func TestInjectModelLabelSkips(t *testing.T) {
 		}
 	}
 	t.Setenv("HARK_MODEL_LABEL", "on")
-	if got := readLabelled(t, labelRequest(t, "/v1/messages", `{"messages":[]}`, "claude-opus-5-5")); !gjson.Get(got, "system").Exists() {
-		t.Fatalf("HARK_MODEL_LABEL=on: not labelled: %s", got)
+	if got := readLabelled(t, labelRequest(t, "/v1/messages", `{"messages":[]}`, "claude-opus-5-5")); got != `{"messages":[]}` {
+		t.Fatalf("HARK_MODEL_LABEL=on mutated original client history: %s", got)
 	}
 	// Other endpoints, invalid JSON, non-JSON content type.
 	if got := readLabelled(t, labelRequest(t, "/v1/messages/count_tokens", `{"messages":[]}`, "x")); got != `{"messages":[]}` {
@@ -217,29 +232,29 @@ func TestSanitizeLabelModel(t *testing.T) {
 	}
 }
 
-// The note survives forceHarkModel: only "model" is rewritten.
+// Transport model mapping must not add an identity note to client history.
 func TestLabelThenForce(t *testing.T) {
 	r := labelRequest(t, "/v1/chat/completions", `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`, "gpt-5")
 	if err := forceHarkModel(r); err != nil {
 		t.Fatal(err)
 	}
 	got := readLabelled(t, r)
-	if gjson.Get(got, "model").Str != Model || len(gjson.Get(got, "messages").Array()) != 2 {
+	if gjson.Get(got, "model").Str != Model || len(gjson.Get(got, "messages").Array()) != 1 {
 		t.Fatalf("got %s", got)
 	}
 }
 
-func TestInjectModelLabelCustomTemplate(t *testing.T) {
+func TestLegacyLabelBodyCustomTemplate(t *testing.T) {
 	r := labelRequest(t, "/v1/responses", `{"input":"hi"}`, "gpt-5.5")
 	r = r.WithContext(context.WithValue(r.Context(), ctxkey.HarkModelLabelPrompt, "  你选的是 {model}，实际由 Hark 回答（{model}）。 "))
-	got := readLabelled(t, r)
+	got := readLegacyLabelBody(t, r)
 	if ins := gjson.Get(got, "instructions").Str; ins != "你选的是 gpt-5.5，实际由 Hark 回答（gpt-5.5）。" {
 		t.Fatalf("instructions: %q", ins)
 	}
 	// Blank template falls back to the built-in note.
 	r = labelRequest(t, "/v1/responses", `{"input":"hi"}`, "gpt-5.5")
 	r = r.WithContext(context.WithValue(r.Context(), ctxkey.HarkModelLabelPrompt, "   "))
-	assertNote(t, gjson.Get(readLabelled(t, r), "instructions").Str, "gpt-5.5")
+	assertNote(t, gjson.Get(readLegacyLabelBody(t, r), "instructions").Str, "gpt-5.5")
 	if !strings.Contains(DefaultModelLabelPrompt, ModelLabelPlaceholder) {
 		t.Fatal("default template lacks placeholder")
 	}

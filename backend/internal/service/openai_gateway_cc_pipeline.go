@@ -102,7 +102,7 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 	upstreamMsg string,
 	upstreamModel string,
 ) *UpstreamFailoverError {
-	if account.IsHark() && isHarkAcceptedTurnFailure(respBody) {
+	if account.IsHark() && (isHarkAcceptedTurnFailure(respBody) || isHarkRequestContextFailure(respBody)) {
 		return nil
 	}
 	shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody)
