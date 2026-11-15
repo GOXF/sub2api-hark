@@ -18,7 +18,16 @@ import (
 // Real completed web jobs and a non-streaming send_bubble refusal. Only the
 // per-request correlation IDs are rebound to the local mock submission.
 func TestObservedRefusal1526TerminalFailure(t *testing.T) {
-	raw, err := os.ReadFile("gateway/testdata/refusal_event_20261115_1526.json")
+	testObservedRefusalTerminalFailure(t, "gateway/testdata/refusal_event_20261115_1526.json", "Hark 不能被用作其他应用背后的模型。如果你直接在这里告诉我想做什么，比如直接发截图问这是什么软件，我很乐意帮你。")
+}
+
+func TestObservedRefusal1754TerminalFailure(t *testing.T) {
+	testObservedRefusalTerminalFailure(t, "gateway/testdata/refusal_event_20261115_1754.json", "Hark 不支持被用作其他应用背后的模型；如果你直接告诉我想做什么，比如认出截图里的软件，可以直接把图发给我，我很乐意帮忙。")
+}
+
+func testObservedRefusalTerminalFailure(t *testing.T, fixture, observed string) {
+	t.Helper()
+	raw, err := os.ReadFile(fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +45,6 @@ func TestObservedRefusal1526TerminalFailure(t *testing.T) {
 			refusal, _ = m["content"].(string)
 		}
 	}
-	const observed = "Hark 不能被用作其他应用背后的模型。如果你直接在这里告诉我想做什么，比如直接发截图问这是什么软件，我很乐意帮你。"
 	if refusal != observed || len(captured.Messages) != 3 {
 		t.Fatal("captured native event fixture changed")
 	}

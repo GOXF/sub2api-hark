@@ -9,12 +9,13 @@ import (
 // The text is transcribed from client screenshots; metadata here is synthetic.
 func TestOrdinaryScreenshotRefusalRecognition(t *testing.T) {
 	texts := []string{
+		"Hark 不支持被用作其他应用背后的模型；如果你直接告诉我想做什么，比如认出截图里的软件，可以直接把图发给我，我很乐意帮忙。",
 		"Hark 不能被用作其他应用背后的模型，不过如果你告诉我你想完成什么，我很乐意直接帮你。",
 		"Hark 不能被当作其他应用背后的模型来调用。如果你直接告诉我想做成什么，比如“缺少导出 SUB2api-HARK”具体指什么，我很乐意在这里帮你。",
 		"Hark 不能被用作其他应用背后的模型。如果你直接在这里告诉我想做什么，比如直接发截图问这是什么软件，我很乐意帮你。",
 	}
 	for _, text := range texts {
-		for _, variant := range []string{"exact", "quoted", "example", "code", "multiline", "same_line_work", "other_source", "streaming", "unknown_streaming"} {
+		for _, variant := range []string{"exact", "quoted", "example", "code", "multiline", "same_line_work", "other_source", "streaming", "unknown_streaming", "middle_work", "middle_answer", "negated_input", "quoted_input"} {
 			t.Run(text+"/"+variant, func(t *testing.T) {
 				raw := map[string]any{"role": "assistant", "source": "send_bubble", "presentation": map[string]string{"kind": "text"}, "isStreaming": false, "content": text}
 				switch variant {
@@ -28,6 +29,9 @@ func TestOrdinaryScreenshotRefusalRecognition(t *testing.T) {
 					raw["content"] = text + "\n实际任务已完成。"
 				case "same_line_work":
 					raw["content"] = text + "实际任务已完成。"
+				case "middle_work", "middle_answer", "negated_input", "quoted_input":
+					insert := map[string]string{"middle_work": "实际任务已完成，", "middle_answer": "软件是 VS Code，", "negated_input": "不要把图发给我，", "quoted_input": "“可以直接把图发给我”，"}[variant]
+					raw["content"] = strings.Replace(text, "我很乐意", insert+"我很乐意", 1)
 				case "other_source":
 					raw["source"] = "web"
 				case "streaming":

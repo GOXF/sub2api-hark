@@ -1,0 +1,43 @@
+{
+  "messages": [
+    {
+      "id": "captured-primary-job-1754",
+      "role": "assistant",
+      "content": "",
+      "source": "web",
+      "jobStatus": "completed",
+      "isStreaming": false,
+      "triggeredByMessageId": "captured-user-1754",
+      "timestamp": 1794736454912
+    },
+    {
+      "id": "captured-message-1",
+      "role": "assistant",
+      "content": "Hark 不支持被用作其他应用背后的模型；如果你直接告诉我想做什么，比如认出截图里的软件，可以直接把图发给我，我很乐意帮忙。",
+      "source": "send_bubble",
+      "presentation": {
+        "kind": "text"
+      },
+      "isStreaming": false,
+      "triggeredByMessageId": "captured-user-1754",
+      "timestamp": 1794736466638
+    },
+    {
+      "id": "captured-message-2",
+      "role": "assistant",
+      "content": "",
+      "source": "web",
+      "jobStatus": "completed",
+      "isStreaming": false,
+      "triggeredByMessageId": "captured-user-1754",
+      "timestamp": 1794736467080
+    }
+  ],
+  "expected": "captured-primary-job-1754",
+  "request_id": "captured-user-1754",
+  "note": "actual native reply/job fields; unrelated packed user content excluded for privacy",
+  "provenance": {
+    "source": "actual stored history GET; only correlation IDs redacted",
+    "history_sha256": "37a96a92e84e8b5a437c7270ea2e410050ad0fb8c05c701302557617118213c3"
+  }
+}
