@@ -443,8 +443,10 @@ func (s *Server) createProjectDirect(ctx context.Context, cookie, zone string) (
 
 type turnHooks struct {
 	// accepted runs once Hark confirmed the message; streaming starts here.
-	accepted     func()
-	acceptedTurn func(expected, requestID string)
+	accepted        func()
+	acceptedTurn    func(expected, requestID string)
+	beforeSend      func(expected, requestID string) error
+	acceptedChecked func() error
 	// poll runs after every history read with the visible text so far.
 	poll   func(partial string)
 	status func(turnStatus)
@@ -460,6 +462,11 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 		Redirected     *bool  `json:"redirected"`
 	}
 	payload["idempotencyKey"], payload["responseMessageId"] = requestID, expected
+	if hooks.beforeSend != nil {
+		if err := hooks.beforeSend(expected, requestID); err != nil {
+			return projectReply{}, err
+		}
+	}
 	if err := s.harkJSON(ctx, "POST", "/api/messages/send?cid="+url.QueryEscape(cid), cookie, payload, &accepted); err != nil {
 		return projectReply{}, err
 	}
@@ -471,6 +478,11 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 	}
 	if hooks.acceptedTurn != nil {
 		hooks.acceptedTurn(expected, requestID)
+	}
+	if hooks.acceptedChecked != nil {
+		if err := hooks.acceptedChecked(); err != nil {
+			return projectReply{}, err
+		}
 	}
 	if hooks.accepted != nil {
 		hooks.accepted()

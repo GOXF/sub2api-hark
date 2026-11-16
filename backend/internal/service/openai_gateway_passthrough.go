@@ -1544,7 +1544,7 @@ func applyOpenAIStreamFailedErrorPassthroughRule(
 	payload []byte,
 	failedMessage string,
 ) (status int, errType string, errMsg string, matched bool) {
-	if isHarkAcceptedTurnFailure(payload) {
+	if isHarkAcceptedTurnFailure(payload) || isHarkRequestContextFailure(payload) {
 		return 0, "", "", false
 	}
 	ruleBody := openAIStreamFailedEventPassthroughBody(payload, failedMessage)
@@ -1561,7 +1561,7 @@ func applyOpenAIStreamFailedErrorPassthroughRule(
 }
 
 func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool {
-	if isHarkAcceptedTurnFailure(payload) {
+	if isHarkAcceptedTurnFailure(payload) || isHarkRequestContextFailure(payload) {
 		return false
 	}
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
@@ -1616,7 +1616,7 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 }
 
 func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
-	if isHarkAcceptedTurnFailure(payload) {
+	if isHarkAcceptedTurnFailure(payload) || isHarkRequestContextFailure(payload) {
 		return false
 	}
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
@@ -1653,6 +1653,10 @@ func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
 	headers http.Header,
 	canonicalModel ...string,
 ) (int, bool) {
+	if account != nil && account.IsHark() && isHarkRequestContextFailure(payload) {
+		status, _ := harkStreamFailure(payload)
+		return status, false
+	}
 	statusCode := openAIStreamFailureStatus(payload, message)
 	if statusCode == http.StatusServiceUnavailable && (account == nil || account.Platform != PlatformOpenAI) {
 		return statusCode, false

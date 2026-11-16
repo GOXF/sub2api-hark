@@ -52,16 +52,36 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}
 	defer s.releaseProject(p)
 
+	owner := recoveryOwner(r)
+	s.projectMu.Lock()
+	if p.OwnerID != "" && p.OwnerID != owner {
+		s.projectMu.Unlock()
+		return &upstreamError{403, "session_owner_mismatch", "原会话不属于当前调用方；未读取或重发"}
+	}
+	if owner != "" && p.OwnerID == "" && unsubmittedProject(p) {
+		p.OwnerID = owner
+	}
+	s.projectMu.Unlock()
+	var plan turnPlan
+	continuing := p.PendingTurn != nil && p.Recovery != nil && p.Recovery.State == "issued"
 	if p.PendingTurn != nil {
-		return &upstreamError{409, "session_turn_pending", "本会话已有已受理但尚未确认结束的请求；原 Project 和上下文已保留，未换号、未重发。请先恢复原请求的结果"}
+		if !continuing {
+			return &upstreamError{409, "session_turn_pending", "本会话已有未确认请求；原上下文和关联已保留，未重发"}
+		}
+		plan, err = s.recoveryTailPlan(r, p, v)
+		if err != nil {
+			return err
+		}
 	}
 	if s.otherAcceptedProject(r, p, v.SessionID) {
 		return &upstreamError{409, "session_account_conflict", "该会话已有另一个账号的已受理上下文；当前空 Project 未发送，原会话已保留。请显式恢复原账号续接"}
 	}
 
-	plan, err := s.planModelLabelTurn(r, p, v)
-	if err != nil {
-		return err
+	if !continuing {
+		plan, err = s.planModelLabelTurn(r, p, v)
+		if err != nil {
+			return err
+		}
 	}
 	if plan.reset {
 		oldCID, oldAccount := p.ConversationID, p.AccountID
@@ -80,7 +100,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 		return err
 	}
 	text, files := renderTurn(plan.send)
-	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" {
+	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" && !continuing {
 		text = "SYSTEM: " + label.note + "\n\n" + text
 	}
 	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
@@ -158,29 +178,57 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 
 	payload := s.nativeProjectPayload(v, s.zoneFor(account), p.ConversationID, text, attachments, account.UserID)
 	var pending pendingProjectTurn
+	contract := s.newRecoveryContract(r, v)
+	if p.OwnerID == "" {
+		contract = nil
+	} // Legacy sessions have no verifiable caller owner.
 	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, acceptedTurn: func(expected, requestID string) {
 		pending.Expected, pending.RequestID = expected, requestID
-	}, accepted: func() {
+	}, acceptedChecked: func() error {
 		s.projectMu.Lock()
-		p.PendingTurn = &pending
-		p.Sent, p.Systems = plan.sent, plan.systems
+		defer s.projectMu.Unlock()
+		next := *p
+		pending.Accepted = true
+		next.PendingTurn = &pending
+		next.Sent, next.Systems = plan.sent, plan.systems
 		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
-			p.ClientSent, p.ClientSystems = plan.sent, plan.systems
-			p.Sent, p.Systems = plan.legacySent, plan.legacySystems
-			p.LabelHistoryVersion = 2
+			next.ClientSent, next.ClientSystems = plan.sent, plan.systems
+			next.Sent, next.Systems = plan.legacySent, plan.legacySystems
+			next.LabelHistoryVersion = 2
 		} else {
-			p.LabelHistoryVersion, p.ClientSent, p.ClientSystems = 0, nil, nil
+			next.LabelHistoryVersion, next.ClientSent, next.ClientSystems = 0, nil, nil
 		}
-		p.Turns++
-		s.projectMu.Unlock()
-		s.persistProjects()
-		if hooks.accepted != nil {
-			hooks.accepted()
+		next.Turns++
+		return s.commitRecoveryLocked(p, next)
+	}, accepted: hooks.accepted}
+	if contract != nil {
+		wrapped.beforeSend = func(expected, requestID string) error {
+			pending = pendingProjectTurn{Expected: expected, RequestID: requestID, Contract: contract}
+			s.projectMu.Lock()
+			defer s.projectMu.Unlock()
+			next := *p
+			copy := pending
+			next.PendingTurn = &copy
+			if continuing {
+				d := *p.Recovery
+				d.State = "continuing"
+				d.AckHash = contract.RequestHash
+				d.TailHash = contract.RequestHash
+				next.Recovery = &d
+				next.RecoverySeen = append(append([]string(nil), p.RecoverySeen...), contract.RequestHash)
+				if len(next.RecoverySeen) > 4096 {
+					return &upstreamError{409, "recovery_journal_full", "恢复去重记录达到预算，未丢弃旧记录或发送新尾部"}
+				}
+			}
+			return s.commitRecoveryLocked(p, next)
 		}
-	}}
+	}
 	reply, err := s.sendProjectPayload(ctx, account.Cookie, p.ConversationID, payload, s.pollInterval, wrapped)
 	if err != nil {
 		if p.PendingTurn != nil {
+			if contract != nil && !p.PendingTurn.Accepted {
+				return &upstreamError{409, "recovery_submission_uncertain", "新提交意图已持久化，但受理尚未确认；未自动重发，请只读核对原关联"}
+			}
 			_, code, message := turnError(ctx, err)
 			if code != "upstream_budget_exhausted" && code != "upstream_generation_failed" {
 				return &upstreamError{409, "upstream_turn_interrupted", "Hark 已受理本次请求，但结果读取中断（" + code + ": " + message + "）；原 Project、受理关联和上下文已保留，未自动换号或重发"}
@@ -194,10 +242,17 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 		return err
 	}
 	s.projectMu.Lock()
-	p.PendingTurn = nil
+	next := *p
+	next.PendingTurn = nil
+	if continuing {
+		d := *p.Recovery
+		d.State = "continued"
+		next.Recovery = &d
+	}
+	persistErr := s.commitRecoveryLocked(p, next)
 	s.projectMu.Unlock()
-	if err := s.persistProjects(); err != nil {
-		return err
+	if persistErr != nil {
+		return persistErr
 	}
 	res.Text, res.Outcome = reply.Text, reply.Outcome
 	if len(reply.Attachments) > 0 {
@@ -300,7 +355,7 @@ func turnError(ctx context.Context, err error) (int, string, string) {
 	case errors.As(err, &ci):
 		status, code, message = 400, ci.code, ci.message
 	}
-	if ctx.Err() != nil && code != "upstream_turn_interrupted" && code != "session_turn_pending" && code != "session_account_conflict" {
+	if ctx.Err() != nil && code != "upstream_turn_interrupted" && code != "session_turn_pending" && code != "session_account_conflict" && code != "session_owner_mismatch" && !strings.HasPrefix(code, "recovery_") {
 		status, code, message = 504, "upstream_timeout", "等待 Hark 关联且完成的回复超时；请求可能已受理，请勿自动重发"
 	}
 	if _, ok := embeddedAccount(ctx); ok {
@@ -355,6 +410,9 @@ func commonPrefix(a, b string) int {
 }
 
 func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest, format outputFormat) {
+	if s.serveRecovery(w, r, v) {
+		return
+	}
 	compact := isCheckpointCompaction(v)
 	w.Header().Set("X-Hark-Context-Isolation", "instruction-only")
 	toolsNote := ""

@@ -373,6 +373,8 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.PUT("/opencode-go-usage/settings", h.Admin.Account.UpdateOpenCodeGoUsageSettings)
 		accounts.GET("/:id", h.Admin.Account.GetByID)
 		accounts.GET("/:id/hark/sessions/:session_id/result", h.Admin.Account.GetHarkSessionResult)
+		accounts.POST("/:id/hark/sessions/:session_id/recovery/prepare", h.Admin.Account.PrepareHarkRecovery)
+		accounts.POST("/:id/hark/sessions/:session_id/recovery/ack", h.Admin.Account.AcknowledgeHarkRecovery)
 		accounts.GET("/:id/claude/reset-credits", h.Admin.Account.ClaudeResetCredits)
 		// Same protection as the Codex reset-quota route (admin auth, audit, compliance guard).
 		accounts.POST("/:id/claude/reset-credits/redeem", h.Admin.Account.RedeemClaudeResetCredit)

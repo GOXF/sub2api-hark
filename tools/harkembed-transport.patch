@@ -201,46 +201,108 @@ index 0000000..547f2f9
 +	return conn, nil
 +}
 diff --git a/chat.go b/chat.go
-index a1e0482..8b7b397 100644
+index a1e0482..026961c 100644
 --- a/chat.go
 +++ b/chat.go
-@@ -55 +55,11 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -55 +55,31 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	plan := planTurn(p, v.Messages)
++	owner := recoveryOwner(r)
++	s.projectMu.Lock()
++	if p.OwnerID != "" && p.OwnerID != owner {
++		s.projectMu.Unlock()
++		return &upstreamError{403, "session_owner_mismatch", "原会话不属于当前调用方；未读取或重发"}
++	}
++	if owner != "" && p.OwnerID == "" && unsubmittedProject(p) {
++		p.OwnerID = owner
++	}
++	s.projectMu.Unlock()
++	var plan turnPlan
++	continuing := p.PendingTurn != nil && p.Recovery != nil && p.Recovery.State == "issued"
 +	if p.PendingTurn != nil {
-+		return &upstreamError{409, "session_turn_pending", "本会话已有已受理但尚未确认结束的请求；原 Project 和上下文已保留，未换号、未重发。请先恢复原请求的结果"}
++		if !continuing {
++			return &upstreamError{409, "session_turn_pending", "本会话已有未确认请求；原上下文和关联已保留，未重发"}
++		}
++		plan, err = s.recoveryTailPlan(r, p, v)
++		if err != nil {
++			return err
++		}
 +	}
 +	if s.otherAcceptedProject(r, p, v.SessionID) {
 +		return &upstreamError{409, "session_account_conflict", "该会话已有另一个账号的已受理上下文；当前空 Project 未发送，原会话已保留。请显式恢复原账号续接"}
 +	}
 +
-+	plan, err := s.planModelLabelTurn(r, p, v)
-+	if err != nil {
-+		return err
++	if !continuing {
++		plan, err = s.planModelLabelTurn(r, p, v)
++		if err != nil {
++			return err
++		}
 +	}
-@@ -73 +83,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -73 +103,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	text += toolPrompt(v.Tools, v.ToolChoice)
-+	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" {
++	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" && !continuing {
 +		text = "SYSTEM: " + label.note + "\n\n" + text
 +	}
 +	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
-@@ -147 +160,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -147 +180,8 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
 +	var pending pendingProjectTurn
++	contract := s.newRecoveryContract(r, v)
++	if p.OwnerID == "" {
++		contract = nil
++	} // Legacy sessions have no verifiable caller owner.
 +	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, acceptedTurn: func(expected, requestID string) {
 +		pending.Expected, pending.RequestID = expected, requestID
-+	}, accepted: func() {
-@@ -148,0 +165 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
-+		p.PendingTurn = &pending
-@@ -149,0 +167,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
++	}, acceptedChecked: func() error {
+@@ -149,6 +189,35 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+-		p.Sent, p.Systems = plan.sent, plan.systems
+-		p.Turns++
+-		s.projectMu.Unlock()
+-		s.persistProjects()
+-		if hooks.accepted != nil {
+-			hooks.accepted()
++		defer s.projectMu.Unlock()
++		next := *p
++		pending.Accepted = true
++		next.PendingTurn = &pending
++		next.Sent, next.Systems = plan.sent, plan.systems
 +		if _, owned := r.Context().Value(modelLabelKey{}).(modelLabelContext); owned {
-+			p.ClientSent, p.ClientSystems = plan.sent, plan.systems
-+			p.Sent, p.Systems = plan.legacySent, plan.legacySystems
-+			p.LabelHistoryVersion = 2
++			next.ClientSent, next.ClientSystems = plan.sent, plan.systems
++			next.Sent, next.Systems = plan.legacySent, plan.legacySystems
++			next.LabelHistoryVersion = 2
 +		} else {
-+			p.LabelHistoryVersion, p.ClientSent, p.ClientSystems = 0, nil, nil
++			next.LabelHistoryVersion, next.ClientSent, next.ClientSystems = 0, nil, nil
 +		}
-@@ -158,0 +183,17 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
++		next.Turns++
++		return s.commitRecoveryLocked(p, next)
++	}, accepted: hooks.accepted}
++	if contract != nil {
++		wrapped.beforeSend = func(expected, requestID string) error {
++			pending = pendingProjectTurn{Expected: expected, RequestID: requestID, Contract: contract}
++			s.projectMu.Lock()
++			defer s.projectMu.Unlock()
++			next := *p
++			copy := pending
++			next.PendingTurn = &copy
++			if continuing {
++				d := *p.Recovery
++				d.State = "continuing"
++				d.AckHash = contract.RequestHash
++				d.TailHash = contract.RequestHash
++				next.Recovery = &d
++				next.RecoverySeen = append(append([]string(nil), p.RecoverySeen...), contract.RequestHash)
++				if len(next.RecoverySeen) > 4096 {
++					return &upstreamError{409, "recovery_journal_full", "恢复去重记录达到预算，未丢弃旧记录或发送新尾部"}
++				}
++			}
++			return s.commitRecoveryLocked(p, next)
+@@ -156 +225 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+-	}}
++	}
+@@ -158,0 +228,14 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 +		if p.PendingTurn != nil {
++			if contract != nil && !p.PendingTurn.Accepted {
++				return &upstreamError{409, "recovery_submission_uncertain", "新提交意图已持久化，但受理尚未确认；未自动重发，请只读核对原关联"}
++			}
 +			_, code, message := turnError(ctx, err)
 +			if code != "upstream_budget_exhausted" && code != "upstream_generation_failed" {
 +				return &upstreamError{409, "upstream_turn_interrupted", "Hark 已受理本次请求，但结果读取中断（" + code + ": " + message + "）；原 Project、受理关联和上下文已保留，未自动换号或重发"}
@@ -251,21 +313,32 @@ index a1e0482..8b7b397 100644
 +			s.projectMu.Unlock()
 +			s.persistProjects()
 +		}
-+		return err
-+	}
+@@ -160,0 +244,13 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 +	s.projectMu.Lock()
-+	p.PendingTurn = nil
++	next := *p
++	next.PendingTurn = nil
++	if continuing {
++		d := *p.Recovery
++		d.State = "continued"
++		next.Recovery = &d
++	}
++	persistErr := s.commitRecoveryLocked(p, next)
 +	s.projectMu.Unlock()
-+	if err := s.persistProjects(); err != nil {
-@@ -204 +245 @@ func (s *Server) recordSuccess(accountID, outcome string) {
++	if persistErr != nil {
++		return persistErr
++	}
+@@ -204 +300 @@ func (s *Server) recordSuccess(accountID, outcome string) {
 -		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
 +		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
-@@ -262 +303 @@ func turnError(ctx context.Context, err error) (int, string, string) {
+@@ -262 +358 @@ func turnError(ctx context.Context, err error) (int, string, string) {
 -	if ctx.Err() != nil {
-+	if ctx.Err() != nil && code != "upstream_turn_interrupted" && code != "session_turn_pending" && code != "session_account_conflict" {
-@@ -316,0 +358 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
++	if ctx.Err() != nil && code != "upstream_turn_interrupted" && code != "session_turn_pending" && code != "session_account_conflict" && code != "session_owner_mismatch" && !strings.HasPrefix(code, "recovery_") {
+@@ -316,0 +413,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
++	if s.serveRecovery(w, r, v) {
++		return
++	}
 +	compact := isCheckpointCompaction(v)
-@@ -318,0 +361,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -318,0 +419,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && !requiresClientTool(v) {
 +		// A checkpoint summarizes existing task context; it must not install an
 +		// execution protocol or forward raw native tools through forward-extra.
@@ -274,10 +347,10 @@ index a1e0482..8b7b397 100644
 +			delete(v.extra, field)
 +		}
 +	}
-@@ -319,0 +370,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -319,0 +428,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	case compact:
 +		toolsNote = "摘要请求不携带执行工具协议"
-@@ -345,0 +398,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -345,0 +456,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && requiresClientTool(v) {
 +		s.turnFailed(w, r, ctx, &upstreamError{400, "compaction_tool_choice_conflict", "摘要请求与必需工具调用冲突；未发送上游，请分别提交摘要请求和执行请求"}, format)
 +		return
@@ -286,25 +359,25 @@ index a1e0482..8b7b397 100644
 +		s.turnFailed(w, r, ctx, err, format)
 +		return
 +	}
-@@ -347,0 +408,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -347,0 +466,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if err == nil {
 +			err = declinedTurnFailure(compact, res)
 +			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		}
-@@ -352,0 +417,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -352,0 +475,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 +			s.turnFailed(w, r, ctx, err, format)
 +			return
 +		}
-@@ -363,0 +433 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -363,0 +491 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	var latestStatus turnStatus
-@@ -399 +469,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -399 +527,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 +			// A required-tool turn is validated before releasing assistant text.
 +			// Keepalives still flow, and ordinary auto/none turns stay incremental.
 +			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -416,0 +489,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -416,0 +547,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
 +		hooks.status = func(status turnStatus) {
 +			mu.Lock()
@@ -316,7 +389,7 @@ index a1e0482..8b7b397 100644
 +			emit("hark.status", status)
 +		}
 +	}
-@@ -419,0 +503,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -419,0 +561,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +	if err == nil {
 +		err = declinedTurnFailure(compact, res)
@@ -325,15 +398,15 @@ index a1e0482..8b7b397 100644
 +		s.applyToolCalls(v, res)
 +		err = validateClientToolResult(v, res.ToolCalls)
 +	}
-@@ -425,0 +517,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -425,0 +575,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 +			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 +			latestStatus.Sequence++
 +			emit("hark.status", latestStatus)
 +		}
-@@ -437 +532,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -437 +590,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -	s.applyToolCalls(v, res)
-@@ -452,0 +548,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -452,0 +606,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 +		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
 +		latestStatus.Sequence++
@@ -608,7 +681,7 @@ index 0000000..5ce9af3
 +	}
 +}
 diff --git a/direct_chat.go b/direct_chat.go
-index 344ea88..7e8a40b 100644
+index 344ea88..4fbeba5 100644
 --- a/direct_chat.go
 +++ b/direct_chat.go
 @@ -135,2 +135,4 @@ type harkMessage struct {
@@ -645,19 +718,32 @@ index 344ea88..7e8a40b 100644
 -		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
 -			return projectReply{Text: notice, Outcome: "declined"}, nil
 -		}
-@@ -426 +446,2 @@ type turnHooks struct {
+@@ -426 +446,4 @@ type turnHooks struct {
 -	accepted func()
-+	accepted     func()
-+	acceptedTurn func(expected, requestID string)
-@@ -428 +449,2 @@ type turnHooks struct {
++	accepted        func()
++	acceptedTurn    func(expected, requestID string)
++	beforeSend      func(expected, requestID string) error
++	acceptedChecked func() error
+@@ -428 +451,2 @@ type turnHooks struct {
 -	poll func(partial string)
 +	poll   func(partial string)
 +	status func(turnStatus)
-@@ -449,0 +472,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -440,0 +465,5 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
++	if hooks.beforeSend != nil {
++		if err := hooks.beforeSend(expected, requestID); err != nil {
++			return projectReply{}, err
++		}
++	}
+@@ -449,0 +479,8 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +	if hooks.acceptedTurn != nil {
 +		hooks.acceptedTurn(expected, requestID)
 +	}
-@@ -452,0 +478,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
++	if hooks.acceptedChecked != nil {
++		if err := hooks.acceptedChecked(); err != nil {
++			return projectReply{}, err
++		}
++	}
+@@ -452,0 +490,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +	var statusTracker *turnStatusTracker
 +	var statusDone chan struct{}
 +	if hooks.status != nil {
@@ -667,11 +753,11 @@ index 344ea88..7e8a40b 100644
 +		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
 +		defer func() { stopStatus(); <-statusDone }()
 +	}
-@@ -457,0 +492,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -457,0 +504,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +		if statusTracker != nil {
 +			statusTracker.history(messages)
 +		}
-@@ -462,0 +500,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -462,0 +512,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +			if statusTracker != nil {
 +				// A job can finish just before the request-level awaiting-person
 +				// patch arrives. Give the existing feed a bounded drain, not a
@@ -982,10 +1068,10 @@ index 0000000..99d8c26
 +	}
 +}
 diff --git a/project_sessions.go b/project_sessions.go
-index 8872c98..6d1196c 100644
+index 8872c98..d15df11 100644
 --- a/project_sessions.go
 +++ b/project_sessions.go
-@@ -31 +31,37 @@ type projectSession struct {
+@@ -31 +31,42 @@ type projectSession struct {
 -	Busy           bool      `json:"-"`
 +	// Version 2 keeps the old sent/systems reader compatible with rollback,
 +	// while the new planner uses the unmodified client-history fingerprints.
@@ -993,12 +1079,17 @@ index 8872c98..6d1196c 100644
 +	ClientSent          []string            `json:"client_sent,omitempty"`
 +	ClientSystems       []string            `json:"client_systems,omitempty"`
 +	PendingTurn         *pendingProjectTurn `json:"pending_turn,omitempty"`
++	OwnerID             string              `json:"owner_id,omitempty"`
++	Recovery            *recoveryDelivery   `json:"recovery_delivery,omitempty"`
++	RecoverySeen        []string            `json:"recovery_seen,omitempty"`
 +	Busy                bool                `json:"-"`
 +}
 +
 +type pendingProjectTurn struct {
-+	Expected  string `json:"expected"`
-+	RequestID string `json:"request_id"`
++	Expected  string            `json:"expected"`
++	RequestID string            `json:"request_id"`
++	Contract  *recoveryContract `json:"contract,omitempty"`
++	Accepted  bool              `json:"accepted,omitempty"`
 +}
 +
 +func unsubmittedProject(p *projectSession) bool {
@@ -1024,13 +1115,36 @@ index 8872c98..6d1196c 100644
 +		}
 +	}
 +	return false
-@@ -171,0 +208,3 @@ type turnPlan struct {
+@@ -140,0 +182,3 @@ func (s *Server) saveProjectsLocked() error {
++	if len(b) > 64*1024*1024 {
++		return errors.New("project session store exceeds safe read budget")
++	}
+@@ -159,0 +204,3 @@ func (s *Server) loadProjects() error {
++		if !validRecoveryRecord(p) {
++			return errors.New("project recovery record invalid; refusing automatic reissue")
++		}
+@@ -171,0 +219,3 @@ type turnPlan struct {
 +	// Legacy-shaped cursors are stored, not sent, for old binary readers.
 +	legacySent    []string
 +	legacySystems []string
-@@ -220 +259 @@ func planTurn(p *projectSession, messages []chatMessage) turnPlan {
+@@ -220 +270 @@ func planTurn(p *projectSession, messages []chatMessage) turnPlan {
 -	if p == nil || p.ConversationID == "" {
 +	if p == nil || p.ConversationID == "" || unsubmittedProject(p) {
+@@ -306,0 +357,3 @@ func (s *Server) cleanupProjects(now time.Time, idle time.Duration) {
++		if p.PendingTurn != nil {
++			continue
++		} // An unresolved accepted/issued turn is never idle cleanup.
+@@ -364,0 +418,10 @@ func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
++	if p.OwnerID != "" && p.OwnerID != recoveryOwner(r) {
++		s.projectMu.Unlock()
++		fail(w, 403, "session_owner_mismatch", "会话不属于当前调用方")
++		return
++	}
++	if p.PendingTurn != nil {
++		s.projectMu.Unlock()
++		fail(w, 409, "session_turn_pending", "会话仍有未确认请求；不能通过归档跳过恢复回执")
++		return
++	}
 diff --git a/proxy_pool.go b/proxy_pool.go
 index bde38c0..a292d77 100644
 --- a/proxy_pool.go
@@ -1039,6 +1153,1264 @@ index bde38c0..a292d77 100644
 -	t := http.DefaultTransport.(*http.Transport).Clone()
 -	t.Proxy = nil
 +	t := browserTransport(nil)
+diff --git a/recovery_delivery.go b/recovery_delivery.go
+new file mode 100644
+index 0000000..c04003a
+--- /dev/null
++++ b/recovery_delivery.go
+@@ -0,0 +1,553 @@
++package gateway
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"slices"
++	"strings"
++	"time"
++)
++
++type recoveryCallerKey struct{}
++
++// CallerHandler binds an authenticated host-owned caller identity. Never
++// expose owner selection as an HTTP header or derive it from the upstream cookie.
++func (s *Server) CallerHandler(owner string) http.Handler {
++	h := s.EmbeddedHandler()
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if validResultID(owner) {
++			r = r.WithContext(context.WithValue(r.Context(), recoveryCallerKey{}, owner))
++		}
++		h.ServeHTTP(w, r)
++	})
++}
++func recoveryOwner(r *http.Request) string {
++	value, _ := r.Context().Value(recoveryCallerKey{}).(string)
++	return value
++}
++
++type recoveryContract struct {
++	Path        string     `json:"path"`
++	RequestHash string     `json:"request_sha256"`
++	ToolHash    string     `json:"tool_sha256"`
++	History     []string   `json:"history"`
++	Tools       []toolSpec `json:"tools"`
++	Choice      string     `json:"choice"`
++	Named       bool       `json:"named"`
++	Stream      bool       `json:"stream"`
++	Model       string     `json:"model"`
++}
++
++type recoveryDelivery struct {
++	ID          string           `json:"id"`
++	State       string           `json:"state"` // ready -> issued -> continuing/acknowledged
++	OwnerID     string           `json:"owner_id"`
++	ProjectID   string           `json:"project_id"`
++	RequestID   string           `json:"request_id"`
++	Expected    string           `json:"response_message_id"`
++	RequestHash string           `json:"request_sha256"`
++	ResultHash  string           `json:"result_sha256"`
++	Contract    recoveryContract `json:"contract"`
++	Calls       []toolCall       `json:"calls"`
++	Text        string           `json:"text"`
++	Wire        []byte           `json:"wire"`
++	WireHash    string           `json:"wire_sha256"`
++	ContentType string           `json:"content_type"`
++	IssuedAt    time.Time        `json:"issued_at,omitempty"`
++	AckHash     string           `json:"ack_sha256,omitempty"`
++	TailHash    string           `json:"tail_sha256,omitempty"`
++}
++
++func canonicalRequestHash(raw []byte) string {
++	var value any
++	d := json.NewDecoder(bytes.NewReader(raw))
++	d.UseNumber()
++	if d.Decode(&value) != nil || d.Decode(&struct{}{}) != io.EOF {
++		return ""
++	}
++	b, err := json.Marshal(value)
++	if err != nil {
++		return ""
++	}
++	return previewDigest(b)
++}
++func recoveryToolHash(tools []toolSpec) string {
++	b, _ := json.Marshal(tools)
++	return canonicalRequestHash(b)
++}
++
++func (s *Server) newRecoveryContract(r *http.Request, v chatRequest) *recoveryContract {
++	if recoveryOwner(r) == "" || v.SessionID == "" || v.SessionEnd || v.Bridge || s.forwardExtra || isCheckpointCompaction(v) {
++		return nil
++	}
++	hash := canonicalRequestHash(v.OriginalBody)
++	if hash == "" {
++		return nil
++	}
++	return &recoveryContract{Path: r.URL.Path, RequestHash: hash, ToolHash: recoveryToolHash(v.Tools), History: hashes(v.Messages), Tools: append([]toolSpec(nil), v.Tools...), Choice: v.ToolChoice, Named: v.ToolChoiceNamed, Stream: v.Stream, Model: v.Model}
++}
++
++// Caller holds projectMu. On failed persistence restore the entire prior value;
++// no wire frame or native submission is allowed until the intent is durable.
++func (s *Server) commitRecoveryLocked(p *projectSession, next projectSession) error {
++	old := *p
++	*p = next
++	if err := s.saveProjectsLocked(); err != nil {
++		*p = old
++		return &upstreamError{503, "recovery_store_failed", "恢复状态持久化失败；未投递或重发"}
++	}
++	return nil
++}
++
++// RecoveryControlHandler is trusted in-process administrator access. It is NOT
++// registered in the public model router; the host supplies the original account.
++func (s *Server) RecoveryControlHandler() http.Handler {
++	m := http.NewServeMux()
++	m.HandleFunc("POST /v1/sessions/{id}/recovery/prepare", s.prepareRecovery)
++	m.HandleFunc("POST /v1/sessions/{id}/recovery/ack", s.ackRecovery)
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Cache-Control", "no-store")
++		if _, ok := embeddedAccount(r.Context()); !ok || s.embed == nil {
++			fail(w, 403, "recovery_operator_required", "缺少宿主指定原账号的管理员操作")
++			return
++		}
++		m.ServeHTTP(w, r)
++	})
++}
++
++type recoveryPrepareInput struct {
++	OwnerID     string `json:"owner_id"`
++	RequestID   string `json:"request_id"`
++	Expected    string `json:"response_message_id"`
++	RequestHash string `json:"request_sha256"`
++	ResultHash  string `json:"result_sha256"`
++}
++
++func (s *Server) prepareRecovery(w http.ResponseWriter, r *http.Request) {
++	var in recoveryPrepareInput
++	if !decode(w, r, &in) {
++		return
++	}
++	sid := r.PathValue("id")
++	a, _ := embeddedAccount(r.Context())
++	id := projectMapping(r, sid)
++	s.projectMu.Lock()
++	p := s.projects[id]
++	if p == nil || p.AccountID != a.ID || p.OwnerID == "" || p.OwnerID != in.OwnerID || p.Archived || p.Ending || p.PendingTurn == nil || p.PendingTurn.Contract == nil || !p.PendingTurn.Accepted {
++		s.projectMu.Unlock()
++		fail(w, 409, "recovery_contract_unverified", "缺少原调用方、原请求契约或已受理证明；旧记录只允许诊断读取")
++		return
++	}
++	if p.Busy {
++		s.projectMu.Unlock()
++		fail(w, 409, "session_busy", "会话仍在处理")
++		return
++	}
++	pendingPtr := p.PendingTurn
++	pending := *pendingPtr
++	contract := *pending.Contract
++	project := p.ConversationID
++	owner := p.OwnerID
++	if in.RequestID != pending.RequestID || in.Expected != pending.Expected || in.RequestHash != contract.RequestHash || !validPreviewSHA(in.ResultHash) {
++		s.projectMu.Unlock()
++		fail(w, 409, "recovery_proof_mismatch", "恢复证明与原始请求不一致")
++		return
++	}
++	if p.Recovery != nil && p.Recovery.RequestID == in.RequestID {
++		d := p.Recovery
++		if d.ResultHash != in.ResultHash || d.RequestHash != in.RequestHash {
++			s.projectMu.Unlock()
++			fail(w, 409, "recovery_proof_mismatch", "同一请求的已保存投递与证明冲突")
++			return
++		}
++		result := recoveryReceipt(d)
++		s.projectMu.Unlock()
++		write(w, 200, result)
++		return
++	}
++	s.projectMu.Unlock()
++	lookup := r.Clone(r.Context())
++	u := *r.URL
++	lookup.URL = &u
++	lookup.URL.RawQuery = url.Values{"request_id": {in.RequestID}, "response_message_id": {in.Expected}}.Encode()
++	result, err := s.readSessionResult(lookup, project)
++	if err != nil {
++		status, code, message := turnError(r.Context(), err)
++		fail(w, status, code, message)
++		return
++	}
++	if result.Status != "completed" && result.Status != "awaiting_client_tool" || len(result.Result.Attachments) > 0 {
++		code := "recovery_result_not_ready"
++		if result.Status == "declined" {
++			fail(w, 409, "upstream_declined", result.Result.Text)
++			return
++		}
++		if result.Status == "failed" {
++			fail(w, 409, result.ErrorCode, result.ErrorMessage)
++			return
++		}
++		fail(w, 409, code, "原结果不是可验收完成结果；未替换拒绝或安装上下文")
++		return
++	}
++	if previewDigest([]byte(result.Result.Text)) != in.ResultHash {
++		fail(w, 409, "recovery_result_mismatch", "原文与明确审阅的结果哈希不同")
++		return
++	}
++	v := chatRequest{Tools: contract.Tools, ToolChoice: contract.Choice, ToolChoiceNamed: contract.Named}
++	res := &turnResult{Text: result.Result.Text, Outcome: "completed"}
++	s.applyToolCalls(v, res)
++	if strings.Contains(res.Text, "<tool_call") {
++		fail(w, 422, "recovery_tool_mismatch", "无法完整解析原工具契约；未执行")
++		return
++	}
++	if err := validateClientToolResult(v, res.ToolCalls); err != nil {
++		status, code, message := turnError(r.Context(), err)
++		fail(w, status, code, message)
++		return
++	}
++	d := &recoveryDelivery{ID: "recovery_" + previewDigest([]byte(id + pending.RequestID + in.RequestHash + in.ResultHash))[:24], State: "ready", OwnerID: owner, ProjectID: project, RequestID: in.RequestID, Expected: in.Expected, RequestHash: in.RequestHash, ResultHash: in.ResultHash, Contract: contract, Text: res.Text, Calls: res.ToolCalls}
++	for i := range d.Calls {
++		d.Calls[i].ID = "call_" + previewDigest([]byte(d.ID + fmt.Sprint(i)))[:24]
++	}
++	d.Wire, d.ContentType = renderRecoveryWire(d)
++	d.WireHash = previewDigest(d.Wire)
++	if len(d.Wire) > maxJSONOverhead {
++		fail(w, 413, "recovery_result_too_large", "恢复投递超过持久化预算")
++		return
++	}
++	s.projectMu.Lock()
++	defer s.projectMu.Unlock()
++	if s.projects[id] != p || p.Busy || p.Archived || p.Ending || p.OwnerID != in.OwnerID || p.ConversationID != project || p.PendingTurn != pendingPtr {
++		fail(w, 409, "session_changed", "准备期间会话变化；未安装投递")
++		return
++	}
++	if p.Recovery != nil && p.Recovery.RequestID == in.RequestID {
++		write(w, 200, recoveryReceipt(p.Recovery))
++		return
++	}
++	next := *p
++	next.Recovery = d
++	next.RecoverySeen = append(append([]string(nil), p.RecoverySeen...), d.RequestHash)
++	if len(next.RecoverySeen) > 4096 {
++		fail(w, 409, "recovery_journal_full", "会话恢复去重记录达到预算；未丢弃旧去重状态")
++		return
++	}
++	if err := s.commitRecoveryLocked(p, next); err != nil {
++		fail(w, 503, "recovery_store_failed", err.Error())
++		return
++	}
++	write(w, 200, recoveryReceipt(d))
++}
++
++func validRecoveryRecord(p *projectSession) bool {
++	if p.PendingTurn != nil && p.PendingTurn.Contract != nil {
++		c := p.PendingTurn.Contract
++		if p.OwnerID == "" || !validPreviewSHA(c.RequestHash) || c.ToolHash != recoveryToolHash(c.Tools) || len(c.History) == 0 {
++			return false
++		}
++	}
++	if d := p.Recovery; d != nil {
++		if p.OwnerID == "" || p.OwnerID != d.OwnerID || p.ConversationID != d.ProjectID || !validPreviewSHA(d.RequestHash) || !validPreviewSHA(d.ResultHash) || len(d.Wire) == 0 || len(d.Wire) > maxJSONOverhead || d.WireHash != previewDigest(d.Wire) || !slices.Contains([]string{"ready", "issued", "continuing", "continued", "acknowledged"}, d.State) {
++			return false
++		}
++		if (d.State == "ready" || d.State == "issued") && (p.PendingTurn == nil || p.PendingTurn.RequestID != d.RequestID || p.PendingTurn.Expected != d.Expected) {
++			return false
++		}
++	}
++	return true
++}
++
++func recoveryReceipt(d *recoveryDelivery) any {
++	return map[string]any{"delivery_id": d.ID, "state": d.State, "result_sha256": d.ResultHash, "request_sha256": d.RequestHash, "tools": len(d.Calls), "continuation_applied": d.State == "continuing", "automatic_reissue": false}
++}
++
++func renderRecoveryWire(d *recoveryDelivery) ([]byte, string) {
++	var f outputFormat
++	stable := strings.TrimPrefix(d.ID, "recovery_")
++	switch d.Contract.Path {
++	case "/v1/responses":
++		f = &responsesFormat{id: "resp_" + stable, messageID: "msg_" + stable, created: 0}
++	case "/v1/messages":
++		f = &anthropicFormat{id: "msg_" + stable, model: d.Contract.Model}
++	default:
++		f = &chatFormat{id: "chatcmpl_" + stable, created: 0}
++	}
++	res := &turnResult{Text: d.Text, ToolCalls: d.Calls, Outcome: "completed"}
++	if !d.Contract.Stream {
++		b, _ := json.Marshal(f.json(res))
++		return append(b, '\n'), "application/json; charset=utf-8"
++	}
++	var b bytes.Buffer
++	emit := func(event string, v any) {
++		data, _ := json.Marshal(v)
++		if event != "" {
++			fmt.Fprintf(&b, "event: %s\n", event)
++		}
++		fmt.Fprintf(&b, "data: %s\n\n", data)
++	}
++	f.start(emit)
++	if d.Text != "" {
++		f.delta(emit, d.Text)
++	}
++	f.finish(emit, d.Text, d.Calls)
++	if f.done() {
++		b.WriteString("data: [DONE]\n\n")
++	}
++	return b.Bytes(), "text/event-stream"
++}
++
++// serveRecovery issues a prepared saved result at most once, BEFORE writing any
++// executable wire data. A dropped connection leaves issued/uncertain, not ready.
++func (s *Server) serveRecovery(w http.ResponseWriter, r *http.Request, v chatRequest) bool {
++	if v.SessionID == "" {
++		return false
++	}
++	s.projectMu.Lock()
++	p := s.projects[projectMapping(r, v.SessionID)]
++	if p == nil {
++		s.projectMu.Unlock()
++		return false
++	}
++	if p.OwnerID != "" && p.OwnerID != recoveryOwner(r) {
++		s.projectMu.Unlock()
++		fail(w, 403, "session_owner_mismatch", "原会话不属于当前调用方")
++		return true
++	}
++	hash := canonicalRequestHash(v.OriginalBody)
++	if p.Recovery == nil {
++		s.projectMu.Unlock()
++		return false
++	}
++	d := p.Recovery
++	if hash != d.RequestHash && hash != d.TailHash {
++		if slices.Contains(p.RecoverySeen, hash) {
++			s.projectMu.Unlock()
++			fail(w, 409, "recovery_delivery_uncertain", "旧恢复请求已处理；不再发行旧工具")
++			return true
++		}
++		s.projectMu.Unlock()
++		return false
++	}
++	if hash != d.RequestHash || d.State != "ready" {
++		s.projectMu.Unlock()
++		fail(w, 409, "recovery_delivery_uncertain", "原投递已发行或续接已处理；不会重复下发工具，请核对显式回执")
++		return true
++	}
++	if p.Busy || p.PendingTurn == nil || p.PendingTurn.RequestID != d.RequestID || p.ConversationID != d.ProjectID || v.SessionEnd || r.URL.Path != d.Contract.Path {
++		s.projectMu.Unlock()
++		fail(w, 409, "session_changed", "原待恢复请求已变化")
++		return true
++	}
++	copy := *d
++	copy.State = "issued"
++	copy.IssuedAt = time.Now().UTC()
++	next := *p
++	next.Recovery = &copy
++	if err := s.commitRecoveryLocked(p, next); err != nil {
++		s.projectMu.Unlock()
++		fail(w, 503, "recovery_store_failed", err.Error())
++		return true
++	}
++	wire := append([]byte(nil), d.Wire...)
++	ct := d.ContentType
++	deliveryID := d.ID
++	s.projectMu.Unlock()
++	w.Header().Set("Cache-Control", "no-store")
++	w.Header().Set("Content-Type", ct)
++	w.Header().Set("X-Hark-Recovery-Delivery", deliveryID)
++	w.WriteHeader(200)
++	_, _ = w.Write(wire)
++	if f, ok := w.(http.Flusher); ok {
++		f.Flush()
++	}
++	return true
++}
++
++func (s *Server) ackRecovery(w http.ResponseWriter, r *http.Request) {
++	var in struct {
++		OwnerID    string `json:"owner_id"`
++		DeliveryID string `json:"delivery_id"`
++		ResultHash string `json:"result_sha256"`
++		Installed  bool   `json:"installed"`
++	}
++	if !decode(w, r, &in) {
++		return
++	}
++	a, _ := embeddedAccount(r.Context())
++	s.projectMu.Lock()
++	defer s.projectMu.Unlock()
++	p := s.projects[projectMapping(r, r.PathValue("id"))]
++	if p == nil || p.AccountID != a.ID || p.Recovery == nil || p.OwnerID != in.OwnerID || !in.Installed {
++		fail(w, 409, "recovery_receipt_invalid", "缺少原调用方和明确安装回执")
++		return
++	}
++	d := p.Recovery
++	if d.ID != in.DeliveryID || d.ResultHash != in.ResultHash || len(d.Calls) > 0 {
++		fail(w, 409, "recovery_receipt_invalid", "工具结果必须由绑定call ID的工具输出确认，不能只清 pending")
++		return
++	}
++	if d.State == "acknowledged" {
++		write(w, 200, recoveryReceipt(d))
++		return
++	}
++	if d.State != "issued" || p.Busy || p.PendingTurn == nil || p.PendingTurn.RequestID != d.RequestID {
++		fail(w, 409, "recovery_receipt_conflict", "回执与当前状态不匹配")
++		return
++	}
++	copy := *d
++	copy.State = "acknowledged"
++	copy.AckHash = previewDigest([]byte(in.DeliveryID + in.ResultHash))
++	next := *p
++	next.Recovery = &copy
++	next.PendingTurn = nil
++	if err := s.commitRecoveryLocked(p, next); err != nil {
++		fail(w, 503, "recovery_store_failed", err.Error())
++		return
++	}
++	write(w, 200, recoveryReceipt(&copy))
++}
++
++func (s *Server) recoveryTailPlan(r *http.Request, p *projectSession, v chatRequest) (turnPlan, error) {
++	d := p.Recovery
++	bad := func() (turnPlan, error) {
++		return turnPlan{}, &upstreamError{409, "recovery_receipt_invalid", "工具输出回执、原历史或工具契约不匹配；未清 pending、未重发"}
++	}
++	if d == nil || d.State != "issued" || p.OwnerID != recoveryOwner(r) || d.OwnerID != p.OwnerID || p.ConversationID != d.ProjectID || p.PendingTurn == nil || p.PendingTurn.RequestID != d.RequestID || r.URL.Path != d.Contract.Path || v.SessionEnd || v.Bridge || len(d.Calls) == 0 || recoveryToolHash(v.Tools) != d.Contract.ToolHash {
++		return bad()
++	}
++	n := len(d.Contract.History)
++	if len(v.Messages) <= n || !slices.Equal(hashes(v.Messages[:n]), d.Contract.History) {
++		return bad()
++	}
++	seenCalls := map[string]bool{}
++	seenOutputs := map[string]bool{}
++	var outputs []chatMessage
++	for _, m := range v.Messages[n:] {
++		if len(m.Files) > 0 {
++			return bad()
++		}
++		switch m.Role {
++		case "assistant":
++			if m.Content != "" && m.Content != d.Text {
++				return bad()
++			}
++			calls, err := recoveryEchoCalls(m.ToolCalls)
++			if err != nil {
++				return bad()
++			}
++			for _, c := range calls {
++				matched := false
++				for _, want := range d.Calls {
++					if c.ID == recoveryWireCallID(d, want) && c.Name == want.Name && c.Namespace == want.Namespace && sameRecoveryArguments(c.Arguments, want.Arguments) {
++						matched = true
++					}
++				}
++				if !matched || seenCalls[c.ID] {
++					return bad()
++				}
++				seenCalls[c.ID] = true
++			}
++		case "tool":
++			id := recoveryOutputID(m.Content)
++			if id == "" || seenOutputs[id] || !seenCalls[id] {
++				return bad()
++			}
++			seenOutputs[id] = true
++			outputs = append(outputs, m)
++		default:
++			return bad()
++		}
++	}
++	if len(seenCalls) != len(d.Calls) || len(seenOutputs) != len(d.Calls) {
++		return bad()
++	}
++	plan := turnPlan{send: outputs, mode: "recovery-tail", sent: hashes(v.Messages), systems: systemHashes(v.Messages, nil)}
++	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok {
++		legacy, err := s.decodeRecoveryBody(r.URL.Path, label.legacyBody)
++		if err != nil {
++			return bad()
++		}
++		plan.legacySent = hashes(legacy.Messages)
++		plan.legacySystems = systemHashes(legacy.Messages, nil)
++	}
++	return plan, nil
++}
++
++func recoveryWireCallID(d *recoveryDelivery, c toolCall) string {
++	if d.Contract.Path == "/v1/messages" {
++		return toolUseID(c)
++	}
++	return c.ID
++}
++func sameRecoveryArguments(a, b string) bool {
++	ha, hb := canonicalRequestHash([]byte(a)), canonicalRequestHash([]byte(b))
++	if ha != "" && hb != "" {
++		return ha == hb
++	}
++	return a == b
++}
++func recoveryOutputID(content string) string {
++	for _, prefix := range []string{"[call_id=", "[tool_call_id="} {
++		if strings.HasPrefix(content, prefix) {
++			rest := strings.TrimPrefix(content, prefix)
++			i := strings.Index(rest, "]")
++			if i > 0 && validResultID(rest[:i]) {
++				return rest[:i]
++			}
++		}
++	}
++	return ""
++}
++func recoveryEchoCalls(raw string) ([]toolCall, error) {
++	var rows []map[string]json.RawMessage
++	if json.Unmarshal([]byte(raw), &rows) != nil {
++		var row map[string]json.RawMessage
++		if json.Unmarshal([]byte(raw), &row) != nil || row == nil {
++			return nil, fmt.Errorf("missing echoed calls")
++		}
++		rows = []map[string]json.RawMessage{row}
++	}
++	var out []toolCall
++	for _, row := range rows {
++		var c toolCall
++		_ = json.Unmarshal(row["call_id"], &c.ID)
++		if c.ID == "" {
++			_ = json.Unmarshal(row["id"], &c.ID)
++		}
++		_ = json.Unmarshal(row["name"], &c.Name)
++		_ = json.Unmarshal(row["namespace"], &c.Namespace)
++		if fn := row["function"]; len(fn) > 0 {
++			var f map[string]json.RawMessage
++			if json.Unmarshal(fn, &f) != nil {
++				return nil, fmt.Errorf("bad echo")
++			}
++			_ = json.Unmarshal(f["name"], &c.Name)
++			row = f
++		}
++		if json.Unmarshal(row["arguments"], &c.Arguments) != nil {
++			c.Arguments = string(row["input"])
++			var input string
++			if json.Unmarshal(row["input"], &input) == nil {
++				c.Arguments = input
++			}
++		}
++		out = append(out, c)
++	}
++	return out, nil
++}
++func (s *Server) decodeRecoveryBody(path string, b []byte) (chatRequest, error) {
++	switch path {
++	case "/v1/responses":
++		return s.normalizeResponses(b)
++	case "/v1/messages":
++		v, _, err := s.normalizeMessages(b)
++		return v, err
++	default:
++		return s.normalizeChat(b)
++	}
++}
+diff --git a/recovery_delivery_codex_test.go b/recovery_delivery_codex_test.go
+new file mode 100644
+index 0000000..05657da
+--- /dev/null
++++ b/recovery_delivery_codex_test.go
+@@ -0,0 +1,116 @@
++package gateway
++
++import (
++	"bytes"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++// Actual installed Codex, temporary profile, synthetic native gateway and one
++// constant dynamic mock tool. No real old thread, shell or business tool is used.
++func TestDurableRecoveryCodexLoopback(t *testing.T) {
++	evidence := os.Getenv("HARK_CODEX_DURABLE_DIR")
++	if evidence == "" {
++		t.Skip("explicit isolated Codex driver required")
++	}
++	if err := os.MkdirAll(evidence, 0700); err != nil {
++		t.Fatal(err)
++	}
++	x := newDurableRig(t, "responses", true)
++	var mu sync.Mutex
++	var records []map[string]any
++	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		mu.Lock()
++		defer mu.Unlock()
++		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
++			http.Error(w, "fixture Responses only", 404)
++			return
++		}
++		b, err := io.ReadAll(io.LimitReader(r.Body, x.s.maxChatBody()+1))
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		_ = r.Body.Close()
++		r.Header.Set("X-Hark-Session-Id", "original-session")
++		if len(records) == 0 {
++			x.body = string(b)
++			// Capture a genuine synthetic acceptance/poll interruption, then
++			// explicitly prepare the recovery BEFORE returning to this test client.
++			v, err := x.s.normalizeResponses(b)
++			if err != nil {
++				t.Error(err)
++				http.Error(w, "bad fixture request", 400)
++				return
++			}
++			if len(v.Tools) == 0 {
++				t.Error("missing client tool contract")
++				return
++			}
++			initial := x.post("fixture-key-A", x.path, x.body, false)
++			// Initial request needs the same fixture session header as the real client.
++			if !strings.Contains(initial.Body.String(), "upstream_turn_interrupted") {
++				t.Errorf("fixture did not retain accepted turn: %s", initial.Body)
++				http.Error(w, "interruption fixture failed", 500)
++				return
++			}
++			if prepared := x.prepare(); prepared.Code != 200 {
++				t.Errorf("explicit synthetic preparation failed: %s", prepared.Body)
++				http.Error(w, "prepare failed", 500)
++				return
++			}
++			x.restart()
++		}
++		r.Body = io.NopCloser(bytes.NewReader(b))
++		r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: "sub2api-50", Cookie: "fixture-cookie"}))
++		rec := httptest.NewRecorder()
++		durableCaller(t, x.s, "fixture-key-A").ServeHTTP(rec, r)
++		records = append(records, map[string]any{"status": rec.Code, "request_bytes": len(b), "request_sha256": previewSHA(b), "response_sha256": previewSHA(rec.Body.Bytes())})
++		for k, values := range rec.Header() {
++			for _, v := range values {
++				w.Header().Add(k, v)
++			}
++		}
++		w.WriteHeader(rec.Code)
++		_, _ = w.Write(rec.Body.Bytes())
++	}))
++	defer loopback.Close()
++	if err := os.WriteFile(filepath.Join(evidence, "server-url.txt"), []byte(loopback.URL), 0600); err != nil {
++		t.Fatal(err)
++	}
++	deadline := time.Now().Add(100 * time.Second)
++	for time.Now().Before(deadline) {
++		if _, err := os.Stat(filepath.Join(evidence, "driver-finished.json")); err == nil {
++			break
++		}
++		time.Sleep(100 * time.Millisecond)
++	}
++	if _, err := os.Stat(filepath.Join(evidence, "driver-finished.json")); err != nil {
++		t.Fatal("isolated Codex driver did not finish")
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	x.mu.Lock()
++	defer x.mu.Unlock()
++	if len(records) != 2 || records[0]["status"] != 200 || records[1]["status"] != 200 || x.sends != 2 || x.archives != 0 {
++		t.Fatalf("durable client loop incomplete: records=%v sends=%d archives=%d", records, x.sends, x.archives)
++	}
++	tail, _ := x.turns[1]["message"].(string)
++	if !strings.Contains(tail, "MOCK_RESULT fixture-only") || strings.Contains(tail, "Read the synthetic fixture only.") {
++		t.Fatal("client tool output did not continue as a new tail only")
++	}
++	result := map[string]any{"client": "installed unmodified Codex app-server", "synthetic_fixture_only": true, "requests": records, "original_native_submissions": 1, "new_tool_output_submissions": 1, "archives": 0, "only_verified_tail_forwarded": true, "real_tools_executed": false, "scope": "explicit admin prepare interposed after synthetic acceptance failure; not import/replay of a real failed client thread"}
++	raw, _ := json.MarshalIndent(result, "", "  ")
++	if err := os.WriteFile(filepath.Join(evidence, "GATEWAY_RESULT.json"), raw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	t.Log("DURABLE_CODEX completed_mock_roundtrip=true original=1 tool_tail=1 archives=0 real_tools=0")
++}
+diff --git a/recovery_delivery_failures_test.go b/recovery_delivery_failures_test.go
+new file mode 100644
+index 0000000..0bd7b08
+--- /dev/null
++++ b/recovery_delivery_failures_test.go
+@@ -0,0 +1,216 @@
++package gateway
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestDurableRecoveryFailures(t *testing.T) {
++	for _, tc := range []string{"wrong-owner", "lost-wire", "store-failure", "tool-receipt-not-clear", "cleanup-pending", "tail-missing-output", "changed-tools", "parallel-issue"} {
++		t.Run(tc, func(t *testing.T) {
++			x := newDurableRig(t, "responses", false)
++			w := x.post("fixture-key-A", x.path, x.body, false)
++			if w.Code != 409 {
++				t.Fatal(w.Body)
++			}
++			if w = x.prepare(); w.Code != 200 {
++				t.Fatal(w.Body)
++			}
++			path := filepath.Join(x.dir, "project-sessions.json")
++			before, _ := os.ReadFile(path)
++			switch tc {
++			case "wrong-owner":
++				w = x.post("fixture-key-B", x.path, x.body, false)
++				if w.Code != 403 {
++					t.Fatal("foreign owner read original tools")
++				}
++			case "lost-wire":
++				r := httptest.NewRequest(http.MethodPost, x.path, strings.NewReader(x.body))
++				r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: "sub2api-50", Cookie: "fixture-cookie"}))
++				broken := &brokenRecoveryWriter{header: http.Header{}}
++				durableCaller(t, x.s, "fixture-key-A").ServeHTTP(broken, r)
++				x.restart()
++				w = x.post("fixture-key-A", x.path, x.body, false)
++				if w.Code != 409 || broken.frames != 1 {
++					t.Fatal("dropped wire allowed a duplicate tool delivery")
++				}
++			case "store-failure":
++				x.s.data = filepath.Join(x.dir, "missing-parent")
++				w = x.post("fixture-key-A", x.path, x.body, false)
++				if w.Code != 503 || strings.Contains(w.Body.String(), "call_") {
++					t.Fatal("tools emitted before durable issuance")
++				}
++				x.s.data = x.dir
++				x.restart()
++				w = x.post("fixture-key-A", x.path, x.body, false)
++				if w.Code != 200 {
++					t.Fatal("failed save poisoned ready record")
++				}
++			case "tool-receipt-not-clear":
++				w = x.post("fixture-key-A", x.path, x.body, false)
++				var ack []byte
++				for _, p := range x.s.projects {
++					ack, _ = json.Marshal(map[string]any{"owner_id": "fixture-key-A", "delivery_id": p.Recovery.ID, "result_sha256": p.Recovery.ResultHash, "installed": true})
++				}
++				w = x.post("", "/v1/sessions/original-session/recovery/ack", string(ack), true)
++				if w.Code != 409 {
++					t.Fatal("boolean receipt cleared unexecuted tools")
++				}
++			case "cleanup-pending":
++				x.s.cleanupProjects(time.Now().Add(48*time.Hour), time.Minute)
++				if len(x.s.projects) != 1 {
++					t.Fatal("pending Project archived by cleanup")
++				}
++			case "tail-missing-output", "changed-tools":
++				w = x.post("fixture-key-A", x.path, x.body, false)
++				body := strings.Replace(x.body, "Inspect mock fixture only", "Different user task", 1)
++				if tc == "changed-tools" {
++					body = strings.Replace(x.body, `"fixture_probe"`, `"other_tool"`, 1)
++				}
++				w = x.post("fixture-key-A", x.path, body, false)
++				if w.Code != 409 {
++					t.Fatal("invalid continuation receipt accepted")
++				}
++			case "parallel-issue":
++				var wg sync.WaitGroup
++				codes := make(chan int, 8)
++				for i := 0; i < 8; i++ {
++					wg.Add(1)
++					go func() { defer wg.Done(); w := x.post("fixture-key-A", x.path, x.body, false); codes <- w.Code }()
++				}
++				wg.Wait()
++				close(codes)
++				ok, conflicts := 0, 0
++				for code := range codes {
++					if code == 200 {
++						ok++
++					} else if code == 409 {
++						conflicts++
++					}
++				}
++				if ok != 1 || conflicts != 7 {
++					t.Fatalf("concurrent issuance: ok=%d conflicts=%d", ok, conflicts)
++				}
++			}
++			x.mu.Lock()
++			sends, archives := x.sends, x.archives
++			x.mu.Unlock()
++			if sends != 1 || archives != 0 {
++				t.Fatal("guard submitted or archived original task")
++			}
++			if tc == "wrong-owner" || tc == "cleanup-pending" {
++				after, _ := os.ReadFile(path)
++				if !bytes.Equal(before, after) {
++					t.Fatal("non-mutating check changed original session")
++				}
++			}
++		})
++	}
++}
++
++type brokenRecoveryWriter struct {
++	header http.Header
++	frames int
++}
++
++func (w *brokenRecoveryWriter) Header() http.Header { return w.header }
++func (w *brokenRecoveryWriter) WriteHeader(int)     {}
++func (w *brokenRecoveryWriter) Write([]byte) (int, error) {
++	w.frames++
++	return 0, fmt.Errorf("synthetic client disconnected")
++}
++
++func TestDurableRecoveryPlainAck(t *testing.T) {
++	x := newDurableRig(t, "responses", false)
++	x.replyText = "Saved plain result"
++	x.body = strings.Replace(x.body, `"tool_choice":"required"`, `"tool_choice":"auto"`, 1)
++	if w := x.post("fixture-key-A", x.path, x.body, false); w.Code != 409 {
++		t.Fatal(w.Body)
++	}
++	if w := x.prepare(); w.Code != 200 {
++		t.Fatal(w.Body)
++	}
++	if w := x.post("fixture-key-A", x.path, x.body, false); w.Code != 200 || !strings.Contains(w.Body.String(), "Saved plain result") {
++		t.Fatal(w.Body)
++	}
++	var ack []byte
++	for _, p := range x.s.projects {
++		ack, _ = json.Marshal(map[string]any{"owner_id": "fixture-key-A", "delivery_id": p.Recovery.ID, "result_sha256": p.Recovery.ResultHash, "installed": true})
++	}
++	for i := 0; i < 2; i++ {
++		x.restart()
++		w := x.post("", "/v1/sessions/original-session/recovery/ack", string(ack), true)
++		if w.Code != 200 {
++			t.Fatalf("explicit ack not idempotent: %d %s", w.Code, w.Body)
++		}
++	}
++	for _, p := range x.s.projects {
++		if p.PendingTurn != nil || p.Recovery.State != "acknowledged" {
++			t.Fatal("verified plain installation acknowledgment not applied")
++		}
++	}
++}
++
++func durableTail(protocol, body, callID string) string {
++	var b map[string]any
++	_ = json.Unmarshal([]byte(body), &b)
++	switch protocol {
++	case "responses":
++		b["tool_choice"] = "auto"
++		b["input"] = []any{map[string]any{"role": "user", "content": "Inspect mock fixture only"}, map[string]any{"type": "function_call", "call_id": callID, "name": "fixture_probe", "arguments": `{"id":"fixture-only"}`}, map[string]any{"type": "function_call_output", "call_id": callID, "output": "MOCK_RESULT durable fixture"}}
++	case "chat":
++		b["tool_choice"] = "auto"
++		b["messages"] = []any{map[string]any{"role": "user", "content": "Inspect mock fixture only"}, map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"id": callID, "type": "function", "function": map[string]any{"name": "fixture_probe", "arguments": `{"id":"fixture-only"}`}}}}, map[string]any{"role": "tool", "tool_call_id": callID, "content": "MOCK_RESULT durable fixture"}}
++	case "messages":
++		b["tool_choice"] = map[string]string{"type": "auto"}
++		b["messages"] = []any{map[string]any{"role": "user", "content": "Inspect mock fixture only"}, map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": callID, "name": "fixture_probe", "input": map[string]string{"id": "fixture-only"}}}}, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": callID, "content": "MOCK_RESULT durable fixture"}}}}
++	}
++	raw, _ := json.Marshal(b)
++	return string(raw)
++}
++
++func TestDurableRecoveryProtocols(t *testing.T) {
++	for _, protocol := range []string{"chat", "responses", "messages"} {
++		for _, stream := range []bool{false, true} {
++			t.Run(fmt.Sprintf("%s/stream=%t", protocol, stream), func(t *testing.T) {
++				x := newDurableRig(t, protocol, stream)
++				w := x.post("fixture-key-A", x.path, x.body, false)
++				if !strings.Contains(w.Body.String(), "upstream_turn_interrupted") {
++					t.Fatal("missing accepted interruption")
++				}
++				if w = x.prepare(); w.Code != 200 {
++					t.Fatal(w.Body)
++				}
++				x.restart()
++				w = x.post("fixture-key-A", x.path, x.body, false)
++				if w.Code != 200 {
++					t.Fatal(w.Body)
++				}
++				callID := regexp.MustCompile(`(?:call_|toolu_)[a-f0-9]+`).FindString(w.Body.String())
++				if callID == "" {
++					t.Fatal("missing standard tool call")
++				}
++				w = x.post("fixture-key-A", x.path, durableTail(protocol, x.body, callID), false)
++				if w.Code != 200 || !strings.Contains(w.Body.String(), "Mock continuation completed") {
++					t.Fatalf("protocol tail failed: %d %s", w.Code, w.Body)
++				}
++				x.mu.Lock()
++				defer x.mu.Unlock()
++				if x.sends != 2 || x.archives != 0 {
++					t.Fatal("replayed original request")
++				}
++				t.Logf("DURABLE_PROTOCOL %s stream=%t original=1 recovery=1 tool_tail=1 archives=0", protocol, stream)
++			})
++		}
++	}
++}
+diff --git a/recovery_delivery_restart_test.go b/recovery_delivery_restart_test.go
+new file mode 100644
+index 0000000..ee83142
+--- /dev/null
++++ b/recovery_delivery_restart_test.go
+@@ -0,0 +1,137 @@
++package gateway
++
++import (
++	"encoding/json"
++	"net/http"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"sync"
++	"testing"
++)
++
++func issuedDurable(t *testing.T) *durableRig {
++	t.Helper()
++	x := newDurableRig(t, "responses", false)
++	if w := x.post("fixture-key-A", x.path, x.body, false); w.Code != 409 {
++		t.Fatal(w.Body)
++	}
++	if w := x.prepare(); w.Code != 200 {
++		t.Fatal(w.Body)
++	}
++	return x
++}
++
++func TestDurableRecoveryTailCrashGuards(t *testing.T) {
++	for _, mode := range []string{"unknown-acceptance", "store-before-send", "parallel-receipt"} {
++		t.Run(mode, func(t *testing.T) {
++			x := issuedDurable(t)
++			w := x.post("fixture-key-A", x.path, x.body, false)
++			id := regexp.MustCompile(`call_[a-f0-9]+`).FindString(w.Body.String())
++			body := durableTail("responses", x.body, id)
++			switch mode {
++			case "unknown-acceptance":
++				x.mu.Lock()
++				x.tailFailure = 503
++				x.mu.Unlock()
++				w = x.post("fixture-key-A", x.path, body, false)
++				if w.Code != 409 || !strings.Contains(w.Body.String(), "recovery_submission_uncertain") {
++					t.Fatalf("unknown acceptance not retained: %d %s", w.Code, w.Body)
++				}
++				x.restart()
++				w = x.post("fixture-key-A", x.path, body, false)
++				if w.Code != 409 {
++					t.Fatal("restart allowed unknown accepted tail replay")
++				}
++			case "store-before-send":
++				x.s.data = filepath.Join(x.dir, "unavailable-parent")
++				w = x.post("fixture-key-A", x.path, body, false)
++				if w.Code < 400 {
++					t.Fatal("tail was submitted without durable intent")
++				}
++				x.mu.Lock()
++				count := x.sends
++				x.mu.Unlock()
++				if count != 1 {
++					t.Fatal("tail submitted before persistence")
++				}
++				x.s.data = x.dir
++				x.restart()
++				w = x.post("fixture-key-A", x.path, body, false)
++				if w.Code != 200 {
++					t.Fatal(w.Body)
++				}
++			case "parallel-receipt":
++				var wg sync.WaitGroup
++				codes := make(chan int, 4)
++				for i := 0; i < 4; i++ {
++					wg.Add(1)
++					go func() { defer wg.Done(); codes <- x.post("fixture-key-A", x.path, body, false).Code }()
++				}
++				wg.Wait()
++				close(codes)
++				ok := 0
++				for code := range codes {
++					if code == 200 {
++						ok++
++					} else if code != 409 {
++						t.Fatalf("unexpected receipt status %d", code)
++					}
++				}
++				if ok != 1 {
++					t.Fatalf("receipt applied %d times", ok)
++				}
++			}
++			x.mu.Lock()
++			defer x.mu.Unlock()
++			if x.sends != 2 || x.archives != 0 {
++				t.Fatalf("tail repeated: submissions=%d archives=%d", x.sends, x.archives)
++			}
++		})
++	}
++}
++
++func TestDurableRecoveryLegacyAndCorruption(t *testing.T) {
++	t.Run("legacy-no-owner", func(t *testing.T) {
++		x := newDurableRig(t, "responses", false)
++		w := x.post("", x.path, x.body, false)
++		if w.Code != 409 {
++			t.Fatal(w.Body)
++		}
++		w = x.prepare()
++		if w.Code != 409 || !strings.Contains(w.Body.String(), "recovery_contract_unverified") {
++			t.Fatal("legacy context was guessed or adopted")
++		}
++		for _, p := range x.s.projects {
++			if p.OwnerID != "" || p.PendingTurn.Contract != nil {
++				t.Fatal("legacy ownership changed")
++			}
++		}
++	})
++	t.Run("corrupt-wire-fails-closed", func(t *testing.T) {
++		x := issuedDurable(t)
++		path := filepath.Join(x.dir, "project-sessions.json")
++		raw, _ := os.ReadFile(path)
++		var rows map[string]map[string]any
++		_ = json.Unmarshal(raw, &rows)
++		for _, row := range rows {
++			d := row["recovery_delivery"].(map[string]any)
++			d["wire_sha256"] = strings.Repeat("0", 64)
++		}
++		raw, _ = json.Marshal(rows)
++		if err := os.WriteFile(path, raw, 0600); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := NewEmbedded(x.dir, Options{Upstream: x.upstream}); err == nil {
++			t.Fatal("corrupted saved wire was reissued after restart")
++		}
++	})
++	t.Run("pending-cannot-end", func(t *testing.T) {
++		x := issuedDurable(t)
++		w := x.post("fixture-key-A", "/v1/sessions/original-session/end", `{}`, false)
++		if w.Code != http.StatusConflict {
++			t.Fatalf("archiving bypassed pending recovery: %d %s", w.Code, w.Body)
++		}
++	})
++}
+diff --git a/recovery_delivery_test.go b/recovery_delivery_test.go
+new file mode 100644
+index 0000000..852e526
+--- /dev/null
++++ b/recovery_delivery_test.go
+@@ -0,0 +1,206 @@
++package gateway
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++type durableRig struct {
++	t                         *testing.T
++	s                         *Server
++	dir, body, path, upstream string
++	mu                        sync.Mutex
++	ready                     bool
++	sends, gets, archives     int
++	turns                     []map[string]any
++	replyText                 string
++	tailFailure               int
++}
++
++func durableCaller(t *testing.T, s *Server, owner string) http.Handler {
++	t.Helper()
++	p, ok := any(s).(interface{ CallerHandler(string) http.Handler })
++	if !ok {
++		t.Fatal("DURABLE_RECOVERY unavailable: no owner-bound delivery and acknowledgment path")
++	}
++	return p.CallerHandler(owner)
++}
++
++func durableControls(t *testing.T, s *Server) http.Handler {
++	t.Helper()
++	p, ok := any(s).(interface{ RecoveryControlHandler() http.Handler })
++	if !ok {
++		t.Fatal("DURABLE_RECOVERY unavailable: no persistent recovery controls")
++	}
++	return p.RecoveryControlHandler()
++}
++
++func newDurableRig(t *testing.T, protocol string, stream bool) *durableRig {
++	t.Helper()
++	x := &durableRig{t: t, dir: t.TempDir()}
++	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		x.mu.Lock()
++		defer x.mu.Unlock()
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/api/conversations":
++			_ = json.NewEncoder(w).Encode(map[string]string{"conversationId": "durable-original-project"})
++		case "/api/messages/send":
++			if r.Method != http.MethodPost {
++				t.Error("wrong submission method")
++			}
++			var p map[string]any
++			_ = json.NewDecoder(r.Body).Decode(&p)
++			x.turns = append(x.turns, p)
++			x.sends++
++			if x.sends > 1 && x.tailFailure != 0 {
++				w.WriteHeader(x.tailFailure)
++				_, _ = w.Write([]byte(`{"error":"synthetic acceptance response lost"}`))
++				return
++			}
++			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "durable-original-project", "messageId": p["idempotencyKey"], "redirected": false})
++		case "/api/messages/history":
++			x.gets++
++			if !x.ready {
++				w.WriteHeader(429)
++				_, _ = w.Write([]byte(`{"error":"fixture polling interrupted"}`))
++				return
++			}
++			var messages []any
++			for i, p := range x.turns {
++				text := previewToolText
++				if x.replyText != "" {
++					text = x.replyText
++				}
++				if i > 0 {
++					text = "Mock continuation completed"
++				}
++				messages = append(messages, map[string]any{"id": p["idempotencyKey"], "role": "user"}, map[string]any{"id": p["responseMessageId"], "role": "assistant", "triggeredByMessageId": p["idempotencyKey"], "status": "completed", "content": text})
++			}
++			_ = json.NewEncoder(w).Encode(map[string]any{"messages": messages})
++		default:
++			if strings.Contains(r.URL.Path, "archive") {
++				x.archives++
++			}
++			_ = json.NewEncoder(w).Encode(map[string]any{})
++		}
++	}))
++	t.Cleanup(u.Close)
++	x.upstream = u.URL
++	x.restart()
++	x.path, x.body = previewRequest(protocol, stream)
++	return x
++}
++
++func (x *durableRig) restart() {
++	x.t.Helper()
++	var err error
++	x.s, err = NewEmbedded(x.dir, Options{Upstream: x.upstream, PollInterval: time.Millisecond})
++	if err != nil {
++		x.t.Fatal(err)
++	}
++}
++func (x *durableRig) post(owner, path, body string, control bool) *httptest.ResponseRecorder {
++	x.t.Helper()
++	h := durableCaller(x.t, x.s, owner)
++	if control {
++		h = durableControls(x.t, x.s)
++	}
++	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
++	r.Header.Set("Content-Type", "application/json")
++	if !control {
++		r.Header.Set("X-Hark-Session-Id", "original-session")
++	}
++	r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: "sub2api-50", Cookie: "fixture-cookie"}))
++	w := httptest.NewRecorder()
++	h.ServeHTTP(w, r)
++	return w
++}
++func (x *durableRig) prepare() *httptest.ResponseRecorder {
++	x.t.Helper()
++	x.mu.Lock()
++	turn := x.turns[0]
++	x.ready = true
++	x.mu.Unlock()
++	var obj any
++	_ = json.Unmarshal([]byte(x.body), &obj)
++	canonical, _ := json.Marshal(obj)
++	text := previewToolText
++	if x.replyText != "" {
++		text = x.replyText
++	}
++	b, _ := json.Marshal(map[string]any{"owner_id": "fixture-key-A", "request_id": turn["idempotencyKey"], "response_message_id": turn["responseMessageId"], "request_sha256": previewSHA(canonical), "result_sha256": previewSHA([]byte(text))})
++	return x.post("", "/v1/sessions/original-session/recovery/prepare", string(b), true)
++}
++
++func TestDurableRecoveryLifecycle(t *testing.T) {
++	x := newDurableRig(t, "responses", false)
++	w := x.post("fixture-key-A", x.path, x.body, false)
++	if w.Code != 409 || !strings.Contains(w.Body.String(), "upstream_turn_interrupted") {
++		t.Fatalf("initial interruption not preserved: %d %s", w.Code, w.Body)
++	}
++	x.restart()
++	w = x.prepare()
++	if w.Code != 200 {
++		t.Fatalf("prepare failed: %d %s", w.Code, w.Body)
++	}
++	x.restart()
++	w = x.post("fixture-key-A", x.path, x.body, false)
++	if w.Code != 200 {
++		t.Fatalf("persisted delivery unavailable: %d %s", w.Code, w.Body)
++	}
++	var envelope map[string]json.RawMessage
++	_ = json.Unmarshal(w.Body.Bytes(), &envelope)
++	var items []map[string]any
++	_ = json.Unmarshal(envelope["output"], &items)
++	if len(items) != 1 || items[0]["name"] != "fixture_probe" {
++		t.Fatalf("missing recovered mock call: %s", w.Body)
++	}
++	callID, _ := items[0]["call_id"].(string)
++	if !strings.HasPrefix(callID, "call_") {
++		t.Fatal("invalid stable call ID")
++	}
++	before, _ := os.ReadFile(filepath.Join(x.dir, "project-sessions.json"))
++	x.restart()
++	again := x.post("fixture-key-A", x.path, x.body, false)
++	if again.Code != 409 || !strings.Contains(again.Body.String(), "recovery_delivery_uncertain") {
++		t.Fatalf("duplicate tool execution was possible: %d %s", again.Code, again.Body)
++	}
++	var b map[string]any
++	_ = json.Unmarshal([]byte(x.body), &b)
++	b["tool_choice"] = "auto"
++	b["input"] = []any{map[string]any{"role": "user", "content": "Inspect mock fixture only"}, map[string]any{"type": "function_call", "call_id": callID, "name": "fixture_probe", "arguments": `{"id":"fixture-only"}`}, map[string]any{"type": "function_call_output", "call_id": callID, "output": "MOCK_RESULT durable fixture"}}
++	tail, _ := json.Marshal(b)
++	w = x.post("fixture-key-A", x.path, string(tail), false)
++	if w.Code != 200 || !strings.Contains(w.Body.String(), "Mock continuation completed") {
++		t.Fatalf("tail-only continuation failed: %d %s", w.Code, w.Body)
++	}
++	x.restart()
++	again = x.post("fixture-key-A", x.path, string(tail), false)
++	if again.Code != 409 {
++		t.Fatalf("ack/tail replay was not idempotent: %d %s", again.Code, again.Body)
++	}
++	x.mu.Lock()
++	defer x.mu.Unlock()
++	if x.sends != 2 || x.archives != 0 || len(x.turns) != 2 {
++		t.Fatalf("replayed original task: sends=%d archives=%d", x.sends, x.archives)
++	}
++	sent, _ := x.turns[1]["message"].(string)
++	if strings.Contains(sent, "Inspect mock fixture only") || !strings.Contains(sent, "MOCK_RESULT durable fixture") {
++		t.Fatal("original task or assistant call was resent instead of only tool output")
++	}
++	after, _ := os.ReadFile(filepath.Join(x.dir, "project-sessions.json"))
++	if bytes.Equal(before, after) {
++		t.Fatal("verified acknowledgment/continuation was not persisted")
++	}
++	t.Log(fmt.Sprintf("DURABLE_RECOVERY initial_send=1 recovered_delivery=1 duplicate_delivery=409 tool_output_tail=1 duplicate_tail=409 archives=0 restart_preserved=true"))
++}
 diff --git a/recovery_preview.go b/recovery_preview.go
 new file mode 100644
 index 0000000..3416d12

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/harkembed/gateway"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -151,11 +152,31 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 	if err := injectModelLabel(in); err != nil {
 		return nil, fmt.Errorf("hark gateway: read request body: %w", err)
 	}
-	resp := serve(s.EmbeddedHandler(), in)
+	handler := s.EmbeddedHandler()
+	if keyID, ok := in.Context().Value(ctxkey.APIKeyID).(int64); ok && keyID > 0 {
+		handler = s.CallerHandler(fmt.Sprintf("sub2api-key-%d", keyID))
+	}
+	resp := serve(handler, in)
 	if usageBody != nil {
 		resp = withUsageEstimate(in, usageBody, resp)
 	}
 	return withMappedIdentityResponse(in, resp), nil
+}
+
+// DoRecoveryControl is privileged host-only account access, never a model
+// request or network header flag. The admin router authenticates its caller.
+func DoRecoveryControl(req *http.Request, proxyURL string, accountID int64) (*http.Response, error) {
+	s, err := get()
+	if err != nil {
+		return nil, err
+	}
+	cred := ParseCredential(apiKeyOf(req))
+	acc := gateway.SourceAccount{ID: fmt.Sprintf("sub2api-%d", accountID), Cookie: cred.Cookie, UserAgent: cred.UserAgent, Proxy: strings.TrimSpace(proxyURL), Timezone: accountTimezone(cred)}
+	in := req.Clone(gateway.WithEmbeddedAccount(req.Context(), acc))
+	in.Header.Del("Authorization")
+	in.Header.Del("x-api-key")
+	in.RequestURI = ""
+	return serve(s.RecoveryControlHandler(), in), nil
 }
 
 // Model is the only model name the Hark gateway accepts.
