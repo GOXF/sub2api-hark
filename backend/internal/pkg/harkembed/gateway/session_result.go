@@ -10,25 +10,53 @@ import (
 	"unicode"
 )
 
-// sessionResult is an embedded, administrator-facing diagnostic, not a model
-// response. It never submits, acknowledges, or installs a turn or tool call.
+type sessionResultBody struct {
+	Text        string     `json:"text"`
+	Attachments []harkFile `json:"attachments"`
+}
+
+type sessionResultData struct {
+	ReadOnly            bool              `json:"read_only"`
+	ContinuationApplied bool              `json:"continuation_applied"`
+	SessionID           string            `json:"session_id"`
+	RequestID           string            `json:"request_id"`
+	ResponseMessageID   string            `json:"response_message_id"`
+	Status              string            `json:"status"`
+	ErrorCode           string            `json:"error_code"`
+	ErrorMessage        string            `json:"error_message"`
+	Result              sessionResultBody `json:"result"`
+}
+
+// sessionResult is an embedded diagnostic, never a model execution response.
 func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
+	result, err := s.readSessionResult(r, "")
+	if err != nil {
+		// readSessionResult has already classified any upstream cancellation.
+		// Do not turn local validation errors into timeouts after cancellation.
+		if failure, ok := err.(*upstreamError); ok {
+			fail(w, failure.status, failure.code, failure.message)
+		} else {
+			fail(w, 500, "session_result_failed", "只读结果不可用")
+		}
+		return
+	}
+	write(w, 200, result)
+}
+
+func (s *Server) readSessionResult(r *http.Request, expectedProject string) (sessionResultData, error) {
 	a, ok := embeddedAccount(r.Context())
 	if !ok || s.embed == nil {
-		fail(w, 401, "embedded_account_required", "只读恢复需要宿主管理员指定原账号")
-		return
+		return sessionResultData{}, &upstreamError{401, "embedded_account_required", "只读恢复需要宿主管理员指定原账号"}
 	}
 	sessionID := r.PathValue("id")
 	if sessionID == "" || validateSession(chatRequest{SessionID: sessionID}) != nil {
-		fail(w, 400, "invalid_session", "会话 ID 无效")
-		return
+		return sessionResultData{}, &upstreamError{400, "invalid_session", "会话 ID 无效"}
 	}
 	// Do not accept a Project supplied by the caller, duplicate selectors, or
 	// silently ignored malformed query parameters.
 	q, err := parseResultQuery(r)
 	if err != nil {
-		fail(w, 400, "invalid_result_selector", "只支持成对的 request_id 和 response_message_id")
-		return
+		return sessionResultData{}, &upstreamError{400, "invalid_result_selector", "只支持成对的 request_id 和 response_message_id"}
 	}
 	requestID, expected := q.Get("request_id"), q.Get("response_message_id")
 	id := projectMapping(r, sessionID)
@@ -36,13 +64,15 @@ func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
 	p := s.projects[id]
 	if p == nil || p.AccountID != a.ID || p.ConversationID == "" || p.Archived || p.Ending {
 		s.projectMu.Unlock()
-		fail(w, 404, "session_not_found", "原账号下没有可读取的会话映射")
-		return
+		return sessionResultData{}, &upstreamError{404, "session_not_found", "原账号下没有可读取的会话映射"}
 	}
 	if p.Busy {
 		s.projectMu.Unlock()
-		fail(w, 409, "session_busy", "原会话仍在处理中；未重发请求")
-		return
+		return sessionResultData{}, &upstreamError{409, "session_busy", "原会话仍在处理中；未重发请求"}
+	}
+	if expectedProject != "" && p.ConversationID != expectedProject {
+		s.projectMu.Unlock()
+		return sessionResultData{}, &upstreamError{409, "session_changed", "预演原 Project 已变化；未读取其他 Project"}
 	}
 	// Copy under the mutex, never use lockSession/releaseProject: those update
 	// LastUsed, cursors and the on-disk mapping even on failed requests.
@@ -57,16 +87,13 @@ func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
 	}
 	s.projectMu.Unlock()
 	if !validResultID(requestID) || !validResultID(expected) || requestID == expected {
-		fail(w, 400, "result_correlation_required", "旧会话需要明确提供原始请求及响应关联 ID")
-		return
+		return sessionResultData{}, &upstreamError{400, "result_correlation_required", "旧会话需要明确提供原始请求及响应关联 ID"}
 	}
 	if hasPending && (pending.RequestID != requestID || pending.Expected != expected) {
-		fail(w, 409, "result_correlation_mismatch", "关联 ID 与原会话待恢复请求不一致")
-		return
+		return sessionResultData{}, &upstreamError{409, "result_correlation_mismatch", "关联 ID 与原会话待恢复请求不一致"}
 	}
 	if a.Cookie == "" || validAccountProxy(a.Proxy) != nil {
-		fail(w, 400, "invalid_original_account", "原账号凭据或代理配置不可用；未换号")
-		return
+		return sessionResultData{}, &upstreamError{400, "invalid_original_account", "原账号凭据或代理配置不可用；未换号"}
 	}
 	// A private reader uses exactly the supplied account's current cookie,
 	// proxy and UA. No account refresh, scheduler, usage probe or registry write.
@@ -82,8 +109,7 @@ func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
 	messages, err := reader.fetchHistory(ctx, a.Cookie, cid)
 	if err != nil {
 		status, code, detail := turnError(ctx, err)
-		fail(w, status, code, detail)
-		return
+		return sessionResultData{}, &upstreamError{status, code, detail}
 	}
 	// A legacy selector is not trusted just because it was supplied by an
 	// administrator: require the native user AND its linked primary job.
@@ -99,8 +125,7 @@ func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if users != 1 || primaries != 1 || !correlated {
-		fail(w, 409, "result_correlation_unverified", "原始事件未证实请求与响应属于同一轮；未返回其他轮结果")
-		return
+		return sessionResultData{}, &upstreamError{409, "result_correlation_unverified", "原始事件未证实请求与响应属于同一轮；未返回其他轮结果"}
 	}
 	// If a submission/end happened during the one bounded GET, refuse the
 	// stale view without modifying either the old or the new state.
@@ -114,8 +139,7 @@ func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
 	}
 	s.projectMu.Unlock()
 	if changed {
-		fail(w, 409, "session_changed", "读取期间原会话状态已变化；未应用恢复结果")
-		return
+		return sessionResultData{}, &upstreamError{409, "session_changed", "读取期间原会话状态已变化；未应用恢复结果"}
 	}
 	reply, resultErr := completedProjectReply(messages, expected, requestID)
 	status, code, detail := reply.Outcome, "", ""
@@ -136,12 +160,8 @@ func (s *Server) sessionResult(w http.ResponseWriter, r *http.Request) {
 			status = "awaiting_client_tool"
 		}
 	}
-	write(w, 200, map[string]any{
-		"read_only": true, "continuation_applied": false, "session_id": sessionID,
-		"request_id": requestID, "response_message_id": expected, "status": status,
-		"error_code": code, "error_message": detail,
-		"result": map[string]any{"text": reply.Text, "attachments": reply.Attachments},
-	})
+	return sessionResultData{ReadOnly: true, SessionID: sessionID, RequestID: requestID, ResponseMessageID: expected,
+		Status: status, ErrorCode: code, ErrorMessage: detail, Result: sessionResultBody{Text: reply.Text, Attachments: reply.Attachments}}, nil
 }
 
 func validResultID(id string) bool {

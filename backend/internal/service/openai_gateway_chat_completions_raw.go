@@ -390,7 +390,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			terminal.ObserveDataLine(trimmedPayload)
 			if trimmedPayload != "[DONE]" {
 				if account.IsHark() {
-					if status, failure := harkAcceptedTurnFailure([]byte(trimmedPayload)); failure != nil {
+					if status, failure := harkStreamFailure([]byte(trimmedPayload)); failure != nil {
 						acceptedFailureStatus, acceptedFailure = status, failure
 					}
 				}

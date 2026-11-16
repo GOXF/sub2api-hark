@@ -19,6 +19,13 @@ import (
 // account, without scheduling, sending, executing tools or updating a session.
 // GET /api/v1/admin/accounts/:id/hark/sessions/:session_id/result
 func (h *AccountHandler) GetHarkSessionResult(c *gin.Context) {
+	h.harkSessionOperation(c, "")
+}
+
+func (h *AccountHandler) PrepareHarkRecovery(c *gin.Context)     { h.harkSessionOperation(c, "prepare") }
+func (h *AccountHandler) AcknowledgeHarkRecovery(c *gin.Context) { h.harkSessionOperation(c, "ack") }
+
+func (h *AccountHandler) harkSessionOperation(c *gin.Context, action string) {
 	c.Header("Cache-Control", "no-store")
 	c.Header("X-Content-Type-Options", "nosniff")
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -63,14 +70,27 @@ func (h *AccountHandler) GetHarkSessionResult(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	endpoint := harkembed.BaseURL + "/v1/sessions/" + url.PathEscape(c.Param("session_id")) + "/result"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	method := http.MethodGet
+	var input io.Reader
+	if action != "" {
+		endpoint = harkembed.BaseURL + "/v1/sessions/" + url.PathEscape(c.Param("session_id")) + "/recovery/" + action
+		method = http.MethodPost
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32768)
+		input = c.Request.Body
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, input)
 	if err != nil {
 		response.BadRequest(c, "Invalid session ID")
 		return
 	}
 	req.URL.RawQuery = c.Request.URL.RawQuery
 	req.Header.Set("Authorization", "Bearer "+key)
-	resp, err := harkembed.Do(req, proxyURL, id)
+	var resp *http.Response
+	if action != "" {
+		resp, err = harkembed.DoRecoveryControl(req, proxyURL, id)
+	} else {
+		resp, err = harkembed.Do(req, proxyURL, id)
+	}
 	if err != nil {
 		response.InternalError(c, "Read-only result lookup failed")
 		return

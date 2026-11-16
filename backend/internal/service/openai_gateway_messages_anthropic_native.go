@@ -474,7 +474,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
 				if account.IsHark() {
-					if status, failure := harkAcceptedTurnFailure([]byte(trimmed)); failure != nil {
+					if status, failure := harkStreamFailure([]byte(trimmed)); failure != nil {
 						acceptedFailure = failure
 						setOpsUpstreamError(c, status, acceptedFailure.Error(), "")
 					}

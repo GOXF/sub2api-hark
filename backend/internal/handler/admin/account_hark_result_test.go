@@ -3,6 +3,7 @@ package admin
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
@@ -51,4 +52,24 @@ func TestAccountHarkSessionResultBoundary(t *testing.T) {
 	// Ordinary account-read permissions must not expose conversation contents.
 	policy := adminaccess.Policy{Rules: []adminaccess.Rule{{Permissions: []string{"accounts.read"}, AllGroups: true, IncludeUngrouped: true, AccountTypes: []string{service.AccountTypeAPIKey}}}}
 	require.False(t, adminaccess.RouteAllowed(policy, http.MethodGet, route))
+}
+
+func TestAccountHarkRecoveryAdminBoundary(t *testing.T) {
+	for _, action := range []string{"prepare", "ack"} {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.Use(gin.HandlerFunc(middleware.NewAdminAuthMiddleware(nil, nil, nil, nil)))
+		h := NewAccountHandler(newStubAdminService(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		pattern := "/api/v1/admin/accounts/:id/hark/sessions/:session_id/recovery/" + action
+		if action == "prepare" {
+			r.POST(pattern, h.PrepareHarkRecovery)
+		} else {
+			r.POST(pattern, h.AcknowledgeHarkRecovery)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/50/hark/sessions/fixture/recovery/"+action, strings.NewReader(`{}`)))
+		require.Equal(t, 401, w.Code)
+		policy := adminaccess.Policy{Rules: []adminaccess.Rule{{Permissions: []string{"accounts.read", "accounts.recover"}, AllGroups: true, IncludeUngrouped: true, AccountTypes: []string{service.AccountTypeAPIKey}}}}
+		require.False(t, adminaccess.RouteAllowed(policy, http.MethodPost, pattern))
+	}
 }

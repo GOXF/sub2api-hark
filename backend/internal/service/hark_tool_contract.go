@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -39,12 +40,35 @@ func isHarkAcceptedTurnFailure(body []byte) bool {
 // cannot repair retained history or contradictory summary/tool requirements.
 func isHarkRequestContextFailure(body []byte) bool {
 	for _, path := range []string{"error.code", "response.error.code"} {
+		if strings.HasPrefix(gjson.GetBytes(body, path).String(), "recovery_") {
+			return true
+		}
 		switch gjson.GetBytes(body, path).String() {
-		case "session_label_history_mismatch", "compaction_tool_choice_conflict", "session_turn_pending", "session_account_conflict":
+		case "session_label_history_mismatch", "compaction_tool_choice_conflict", "session_turn_pending", "session_account_conflict", "session_owner_mismatch":
 			return true
 		}
 	}
 	return false
+}
+
+// Stream transport may already be HTTP 200. A request-scoped recovery failure
+// must still end as a failure, without treating it as a new account failure.
+func harkStreamFailure(body []byte) (int, error) {
+	if !isHarkRequestContextFailure(body) {
+		return harkAcceptedTurnFailure(body)
+	}
+	code := gjson.GetBytes(body, "error.code").String()
+	if code == "" {
+		code = gjson.GetBytes(body, "response.error.code").String()
+	}
+	status := http.StatusConflict
+	switch code {
+	case "session_owner_mismatch":
+		status = http.StatusForbidden
+	case "recovery_store_failed":
+		status = http.StatusServiceUnavailable
+	}
+	return status, fmt.Errorf("%s: %s", code, extractUpstreamErrorMessage(body))
 }
 
 func writeHarkRequestContextError(c *gin.Context, status int, body []byte) error {

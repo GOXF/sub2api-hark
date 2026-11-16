@@ -34,12 +34,17 @@ type projectSession struct {
 	ClientSent          []string            `json:"client_sent,omitempty"`
 	ClientSystems       []string            `json:"client_systems,omitempty"`
 	PendingTurn         *pendingProjectTurn `json:"pending_turn,omitempty"`
+	OwnerID             string              `json:"owner_id,omitempty"`
+	Recovery            *recoveryDelivery   `json:"recovery_delivery,omitempty"`
+	RecoverySeen        []string            `json:"recovery_seen,omitempty"`
 	Busy                bool                `json:"-"`
 }
 
 type pendingProjectTurn struct {
-	Expected  string `json:"expected"`
-	RequestID string `json:"request_id"`
+	Expected  string            `json:"expected"`
+	RequestID string            `json:"request_id"`
+	Contract  *recoveryContract `json:"contract,omitempty"`
+	Accepted  bool              `json:"accepted,omitempty"`
 }
 
 func unsubmittedProject(p *projectSession) bool {
@@ -174,6 +179,9 @@ func (s *Server) saveProjectsLocked() error {
 	if err != nil {
 		return err
 	}
+	if len(b) > 64*1024*1024 {
+		return errors.New("project session store exceeds safe read budget")
+	}
 	return atomicPrivate(filepath.Join(s.data, "project-sessions.json"), b)
 }
 
@@ -192,6 +200,9 @@ func (s *Server) loadProjects() error {
 	for id, p := range s.projects {
 		if p == nil || p.MappingID != id || p.AccountID == "" || p.ConversationID == "" || len(p.ConversationID) > 200 || p.LastUsed.IsZero() {
 			return errors.New("project session record invalid")
+		}
+		if !validRecoveryRecord(p) {
+			return errors.New("project recovery record invalid; refusing automatic reissue")
 		}
 	}
 	return nil
@@ -343,6 +354,9 @@ func (s *Server) cleanupProjects(now time.Time, idle time.Duration) {
 	s.projectMu.Lock()
 	var pending []*projectSession
 	for _, p := range s.projects {
+		if p.PendingTurn != nil {
+			continue
+		} // An unresolved accepted/issued turn is never idle cleanup.
 		if !p.Busy && (p.Ending || p.Archived || now.Sub(p.LastUsed) >= idle) {
 			p.Busy = true
 			pending = append(pending, p)
@@ -399,6 +413,16 @@ func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
 	if p == nil || p.Archived {
 		s.projectMu.Unlock()
 		write(w, 200, map[string]any{"ok": true, "session_id": v.SessionID, "existed": false, "archived": false})
+		return
+	}
+	if p.OwnerID != "" && p.OwnerID != recoveryOwner(r) {
+		s.projectMu.Unlock()
+		fail(w, 403, "session_owner_mismatch", "会话不属于当前调用方")
+		return
+	}
+	if p.PendingTurn != nil {
+		s.projectMu.Unlock()
+		fail(w, 409, "session_turn_pending", "会话仍有未确认请求；不能通过归档跳过恢复回执")
 		return
 	}
 	if p.Busy {
