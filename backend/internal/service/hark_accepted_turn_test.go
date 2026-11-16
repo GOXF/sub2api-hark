@@ -22,7 +22,7 @@ func TestHarkUnacceptedRateLimitStillFailsOver(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	body := []byte(`{"error":{"code":"upstream_rate_limited","message":"before acceptance"}}`)
 	require.True(t, svc.shouldFailoverOpenAIUpstreamResponse(&Account{Platform: "hark"}, http.StatusTooManyRequests, "", body))
-	for _, code := range []string{"session_turn_pending", "session_account_conflict", "session_owner_mismatch", "recovery_delivery_uncertain", "recovery_store_failed", "recovery_submission_uncertain", "recovery_receipt_invalid"} {
+	for _, code := range []string{"session_turn_pending", "session_account_conflict", "session_owner_mismatch", "recovery_delivery_uncertain", "recovery_store_failed", "recovery_submission_uncertain", "recovery_submission_rejected", "recovery_submission_not_sent", "recovery_error_record_failed", "recovery_receipt_invalid"} {
 		body := []byte(`{"error":{"code":"` + code + `","message":"retained context"}}`)
 		require.False(t, svc.shouldFailoverOpenAIUpstreamResponse(&Account{Platform: "hark"}, http.StatusBadGateway, "", body))
 	}
@@ -43,7 +43,7 @@ func TestHarkAcceptedInterruptionForwardingDoesNotReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
 		for _, stream := range []bool{false, true} {
-			for _, code := range []string{"upstream_turn_interrupted", "recovery_delivery_uncertain", "recovery_receipt_invalid", "recovery_submission_uncertain", "recovery_store_failed", "session_owner_mismatch"} {
+			for _, code := range []string{"upstream_turn_interrupted", "recovery_delivery_uncertain", "recovery_receipt_invalid", "recovery_submission_uncertain", "recovery_submission_rejected", "recovery_submission_not_sent", "recovery_error_record_failed", "recovery_store_failed", "session_owner_mismatch"} {
 				t.Run(fmt.Sprintf("%s/stream=%t/%s", path, stream, code), func(t *testing.T) {
 					body := []byte(fmt.Sprintf(`{"model":"fixture-model","stream":%t,"max_tokens":32,"messages":[{"role":"user","content":"Inspect fixture only"}]}`, stream))
 					if path == "/v1/responses" {

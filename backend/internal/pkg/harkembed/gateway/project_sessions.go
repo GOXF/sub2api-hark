@@ -41,10 +41,11 @@ type projectSession struct {
 }
 
 type pendingProjectTurn struct {
-	Expected  string            `json:"expected"`
-	RequestID string            `json:"request_id"`
-	Contract  *recoveryContract `json:"contract,omitempty"`
-	Accepted  bool              `json:"accepted,omitempty"`
+	Expected  string             `json:"expected"`
+	RequestID string             `json:"request_id"`
+	Contract  *recoveryContract  `json:"contract,omitempty"`
+	Accepted  bool               `json:"accepted,omitempty"`
+	Failure   *submissionFailure `json:"submission_failure,omitempty"`
 }
 
 func unsubmittedProject(p *projectSession) bool {

@@ -153,7 +153,8 @@ func (s *Server) refreshUsageHandler(w http.ResponseWriter, r *http.Request) {
 
 // Caller holds mu.
 func (s *Server) markAccountLocked(i int, err error) {
-	e, _ := err.(*upstreamError)
+	var e *upstreamError
+	_ = errors.As(err, &e)
 	status, detail := "expired", "Hark 返回 401，登录会话已失效"
 	if e != nil && e.code == "upstream_access_blocked" {
 		status, detail = "blocked", e.message

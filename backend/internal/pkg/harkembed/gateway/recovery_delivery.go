@@ -245,6 +245,11 @@ func (s *Server) prepareRecovery(w http.ResponseWriter, r *http.Request) {
 }
 
 func validRecoveryRecord(p *projectSession) bool {
+	if p.PendingTurn != nil {
+		if !validSubmissionFailure(p.PendingTurn.Failure) || (p.PendingTurn.Failure != nil && (p.PendingTurn.Accepted || p.PendingTurn.Contract == nil)) {
+			return false
+		}
+	}
 	if p.PendingTurn != nil && p.PendingTurn.Contract != nil {
 		c := p.PendingTurn.Contract
 		if p.OwnerID == "" || !validPreviewSHA(c.RequestHash) || c.ToolHash != recoveryToolHash(c.Tools) || len(c.History) == 0 {
@@ -324,6 +329,13 @@ func (s *Server) serveRecovery(w http.ResponseWriter, r *http.Request, v chatReq
 		return false
 	}
 	d := p.Recovery
+	if p.PendingTurn != nil && p.PendingTurn.Failure != nil && p.PendingTurn.Contract != nil && hash == p.PendingTurn.Contract.RequestHash {
+		err := p.PendingTurn.Failure.responseError()
+		s.projectMu.Unlock()
+		status, code, message := turnError(r.Context(), err)
+		fail(w, status, code, message)
+		return true
+	}
 	if hash != d.RequestHash && hash != d.TailHash {
 		if slices.Contains(p.RecoverySeen, hash) {
 			s.projectMu.Unlock()
