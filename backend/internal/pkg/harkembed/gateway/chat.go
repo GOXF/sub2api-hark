@@ -66,6 +66,9 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	continuing := p.PendingTurn != nil && p.Recovery != nil && p.Recovery.State == "issued"
 	if p.PendingTurn != nil {
 		if !continuing {
+			if p.PendingTurn.Failure != nil {
+				return p.PendingTurn.Failure.responseError()
+			}
 			return &upstreamError{409, "session_turn_pending", "本会话已有未确认请求；原上下文和关联已保留，未重发"}
 		}
 		plan, err = s.recoveryTailPlan(r, p, v)
@@ -227,7 +230,10 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	if err != nil {
 		if p.PendingTurn != nil {
 			if contract != nil && !p.PendingTurn.Accepted {
-				return &upstreamError{409, "recovery_submission_uncertain", "新提交意图已持久化，但受理尚未确认；未自动重发，请只读核对原关联"}
+				if p.PendingTurn.RequestID != pending.RequestID {
+					return err // No new intent was installed; do not overwrite an older turn.
+				}
+				return s.retainSubmissionFailure(p, err)
 			}
 			_, code, message := turnError(ctx, err)
 			if code != "upstream_budget_exhausted" && code != "upstream_generation_failed" {

@@ -16,15 +16,16 @@ type sessionResultBody struct {
 }
 
 type sessionResultData struct {
-	ReadOnly            bool              `json:"read_only"`
-	ContinuationApplied bool              `json:"continuation_applied"`
-	SessionID           string            `json:"session_id"`
-	RequestID           string            `json:"request_id"`
-	ResponseMessageID   string            `json:"response_message_id"`
-	Status              string            `json:"status"`
-	ErrorCode           string            `json:"error_code"`
-	ErrorMessage        string            `json:"error_message"`
-	Result              sessionResultBody `json:"result"`
+	ReadOnly            bool               `json:"read_only"`
+	ContinuationApplied bool               `json:"continuation_applied"`
+	SessionID           string             `json:"session_id"`
+	RequestID           string             `json:"request_id"`
+	ResponseMessageID   string             `json:"response_message_id"`
+	Status              string             `json:"status"`
+	ErrorCode           string             `json:"error_code"`
+	ErrorMessage        string             `json:"error_message"`
+	Result              sessionResultBody  `json:"result"`
+	SubmissionFailure   *submissionFailure `json:"submission_failure,omitempty"`
 }
 
 // sessionResult is an embedded diagnostic, never a model execution response.
@@ -91,6 +92,13 @@ func (s *Server) readSessionResult(r *http.Request, expectedProject string) (ses
 	}
 	if hasPending && (pending.RequestID != requestID || pending.Expected != expected) {
 		return sessionResultData{}, &upstreamError{409, "result_correlation_mismatch", "关联 ID 与原会话待恢复请求不一致"}
+	}
+	if hasPending && pending.Failure != nil {
+		// This is saved submission evidence, not a fabricated native result.
+		// No GET, retry, registry refresh, installation or pending clear occurs.
+		return sessionResultData{ReadOnly: true, SessionID: sessionID, RequestID: requestID, ResponseMessageID: expected,
+			Status: "submission_" + pending.Failure.Outcome, ErrorCode: pending.Failure.Code,
+			ErrorMessage: pending.Failure.Message, SubmissionFailure: pending.Failure}, nil
 	}
 	if a.Cookie == "" || validAccountProxy(a.Proxy) != nil {
 		return sessionResultData{}, &upstreamError{400, "invalid_original_account", "原账号凭据或代理配置不可用；未换号"}

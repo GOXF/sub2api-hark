@@ -201,10 +201,10 @@ index 0000000..547f2f9
 +	return conn, nil
 +}
 diff --git a/chat.go b/chat.go
-index a1e0482..026961c 100644
+index a1e0482..7ad9b68 100644
 --- a/chat.go
 +++ b/chat.go
-@@ -55 +55,31 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -55 +55,34 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	plan := planTurn(p, v.Messages)
 +	owner := recoveryOwner(r)
 +	s.projectMu.Lock()
@@ -220,6 +220,9 @@ index a1e0482..026961c 100644
 +	continuing := p.PendingTurn != nil && p.Recovery != nil && p.Recovery.State == "issued"
 +	if p.PendingTurn != nil {
 +		if !continuing {
++			if p.PendingTurn.Failure != nil {
++				return p.PendingTurn.Failure.responseError()
++			}
 +			return &upstreamError{409, "session_turn_pending", "本会话已有未确认请求；原上下文和关联已保留，未重发"}
 +		}
 +		plan, err = s.recoveryTailPlan(r, p, v)
@@ -237,13 +240,13 @@ index a1e0482..026961c 100644
 +			return err
 +		}
 +	}
-@@ -73 +103,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -73 +106,4 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	text += toolPrompt(v.Tools, v.ToolChoice)
 +	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" && !continuing {
 +		text = "SYSTEM: " + label.note + "\n\n" + text
 +	}
 +	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
-@@ -147 +180,8 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -147 +183,8 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	wrapped := turnHooks{poll: hooks.poll, accepted: func() {
 +	var pending pendingProjectTurn
 +	contract := s.newRecoveryContract(r, v)
@@ -253,7 +256,7 @@ index a1e0482..026961c 100644
 +	wrapped := turnHooks{poll: hooks.poll, status: hooks.status, acceptedTurn: func(expected, requestID string) {
 +		pending.Expected, pending.RequestID = expected, requestID
 +	}, acceptedChecked: func() error {
-@@ -149,6 +189,35 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -149,6 +192,35 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -		p.Sent, p.Systems = plan.sent, plan.systems
 -		p.Turns++
 -		s.projectMu.Unlock()
@@ -295,13 +298,16 @@ index a1e0482..026961c 100644
 +				}
 +			}
 +			return s.commitRecoveryLocked(p, next)
-@@ -156 +225 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -156 +228 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 -	}}
 +	}
-@@ -158,0 +228,14 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -158,0 +231,17 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 +		if p.PendingTurn != nil {
 +			if contract != nil && !p.PendingTurn.Accepted {
-+				return &upstreamError{409, "recovery_submission_uncertain", "新提交意图已持久化，但受理尚未确认；未自动重发，请只读核对原关联"}
++				if p.PendingTurn.RequestID != pending.RequestID {
++					return err // No new intent was installed; do not overwrite an older turn.
++				}
++				return s.retainSubmissionFailure(p, err)
 +			}
 +			_, code, message := turnError(ctx, err)
 +			if code != "upstream_budget_exhausted" && code != "upstream_generation_failed" {
@@ -313,7 +319,7 @@ index a1e0482..026961c 100644
 +			s.projectMu.Unlock()
 +			s.persistProjects()
 +		}
-@@ -160,0 +244,13 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
+@@ -160,0 +250,13 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 +	s.projectMu.Lock()
 +	next := *p
 +	next.PendingTurn = nil
@@ -327,18 +333,18 @@ index a1e0482..026961c 100644
 +	if persistErr != nil {
 +		return persistErr
 +	}
-@@ -204 +300 @@ func (s *Server) recordSuccess(accountID, outcome string) {
+@@ -204 +306 @@ func (s *Server) recordSuccess(accountID, outcome string) {
 -		s.event("warning", "聊天请求", "Hark 已完成任务并返回 declined_notice；已透传结束提示")
 +		s.event("warning", "聊天请求", "上游拒绝执行请求；已保留原文与拒绝状态，未标记聊天验证通过")
-@@ -262 +358 @@ func turnError(ctx context.Context, err error) (int, string, string) {
+@@ -262 +364 @@ func turnError(ctx context.Context, err error) (int, string, string) {
 -	if ctx.Err() != nil {
 +	if ctx.Err() != nil && code != "upstream_turn_interrupted" && code != "session_turn_pending" && code != "session_account_conflict" && code != "session_owner_mismatch" && !strings.HasPrefix(code, "recovery_") {
-@@ -316,0 +413,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -316,0 +419,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if s.serveRecovery(w, r, v) {
 +		return
 +	}
 +	compact := isCheckpointCompaction(v)
-@@ -318,0 +419,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -318,0 +425,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && !requiresClientTool(v) {
 +		// A checkpoint summarizes existing task context; it must not install an
 +		// execution protocol or forward raw native tools through forward-extra.
@@ -347,10 +353,10 @@ index a1e0482..026961c 100644
 +			delete(v.extra, field)
 +		}
 +	}
-@@ -319,0 +428,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -319,0 +434,2 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	case compact:
 +		toolsNote = "摘要请求不携带执行工具协议"
-@@ -345,0 +456,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -345,0 +462,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if compact && requiresClientTool(v) {
 +		s.turnFailed(w, r, ctx, &upstreamError{400, "compaction_tool_choice_conflict", "摘要请求与必需工具调用冲突；未发送上游，请分别提交摘要请求和执行请求"}, format)
 +		return
@@ -359,25 +365,25 @@ index a1e0482..026961c 100644
 +		s.turnFailed(w, r, ctx, err, format)
 +		return
 +	}
-@@ -347,0 +466,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -347,0 +472,4 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if err == nil {
 +			err = declinedTurnFailure(compact, res)
 +			w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		}
-@@ -352,0 +475,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -352,0 +481,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +		if err := validateClientToolResult(v, res.ToolCalls); err != nil {
 +			s.turnFailed(w, r, ctx, err, format)
 +			return
 +		}
-@@ -363,0 +491 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -363,0 +497 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	var latestStatus turnStatus
-@@ -399 +527,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -399 +533,3 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -			if len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
 +			// A required-tool turn is validated before releasing assistant text.
 +			// Keepalives still flow, and ordinary auto/none turns stay incremental.
 +			if !compact && !requiresClientTool(v) && len(partial) > len(emitted) && strings.HasPrefix(partial, emitted) {
-@@ -416,0 +547,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -416,0 +553,11 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
 +		hooks.status = func(status turnStatus) {
 +			mu.Lock()
@@ -389,7 +395,7 @@ index a1e0482..026961c 100644
 +			emit("hark.status", status)
 +		}
 +	}
-@@ -419,0 +561,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -419,0 +567,8 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	w.Header().Set("X-Hark-Upstream-Outcome", res.Outcome)
 +	if err == nil {
 +		err = declinedTurnFailure(compact, res)
@@ -398,15 +404,15 @@ index a1e0482..026961c 100644
 +		s.applyToolCalls(v, res)
 +		err = validateClientToolResult(v, res.ToolCalls)
 +	}
-@@ -425,0 +575,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -425,0 +581,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +		if latestStatus.Type != "" && latestStatus.Reason != "upstream_declined" && r.Context().Err() == nil {
 +			latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "error"
 +			latestStatus.Sequence++
 +			emit("hark.status", latestStatus)
 +		}
-@@ -437 +590,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -437 +596,0 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 -	s.applyToolCalls(v, res)
-@@ -452,0 +606,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
+@@ -452,0 +612,5 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 +	if latestStatus.Type != "" && latestStatus.Status != "waiting_for_user" && latestStatus.Status != "ended" {
 +		latestStatus.Status, latestStatus.Line, latestStatus.LineKey, latestStatus.Reason = "ended", "", "", "stream_ended"
 +		latestStatus.Sequence++
@@ -681,17 +687,59 @@ index 0000000..5ce9af3
 +	}
 +}
 diff --git a/direct_chat.go b/direct_chat.go
-index 344ea88..4fbeba5 100644
+index 344ea88..ff1c421 100644
 --- a/direct_chat.go
 +++ b/direct_chat.go
-@@ -135,2 +135,4 @@ type harkMessage struct {
+@@ -7,0 +8 @@ import (
++	"errors"
+@@ -26,2 +27,2 @@ func isAuthError(err error) bool {
+-	e, ok := err.(*upstreamError)
+-	return ok && (e.code == "upstream_session_expired" || e.code == "upstream_access_blocked")
++	var e *upstreamError
++	return errors.As(err, &e) && (e.code == "upstream_session_expired" || e.code == "upstream_access_blocked")
+@@ -47 +48,12 @@ func (s *Server) harkJSON(ctx context.Context, method, path, cookie string, inpu
+-func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string, input, output any, limit int64) error {
++func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string, input, output any, limit int64) (failure error) {
++	phase, status := "prepare", 0
++	var responseBody []byte
++	var transportError string
++	if isNativeSubmission(method, path) {
++		defer func() {
++			failure = nativeSubmissionFailure(failure, phase, status, responseBody, cookie)
++			if native, ok := failure.(*nativeSubmissionError); ok {
++				native.failure.TransportError = safeSubmissionText(transportError, cookie, 8192)
++			}
++		}()
++	}
+@@ -69,0 +82 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
++	phase = "send"
+@@ -71,0 +85 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
++		transportError = err.Error()
+@@ -74,0 +89 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
++	phase, status = "response", resp.StatusCode
+@@ -76 +91,5 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
+-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
++		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 65537))
++		responseBody = body
++		if readErr != nil {
++			phase, transportError = "read_response", readErr.Error()
++		}
+@@ -102,0 +122 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
++	phase = "decode_response"
+@@ -103,0 +124 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
++	responseBody = b
+@@ -104,0 +126,3 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
++		if err != nil {
++			transportError = err.Error()
++		}
+@@ -135,2 +159,4 @@ type harkMessage struct {
 -	Onboarding  json.RawMessage `json:"onboarding"`
 -	Attachments []harkFile      `json:"attachments"`
 +	Onboarding  json.RawMessage  `json:"onboarding"`
 +	Narration   *statusNarration `json:"narration"`
 +	InputNeeded bool             `json:"inputNeeded"`
 +	Attachments []harkFile       `json:"attachments"`
-@@ -300,0 +303,12 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
+@@ -300,0 +327,12 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 +		// A native, turn-bound refusal takes precedence over explanatory text.
 +		// Keep both original parts; never replace a refusal with a success body.
 +		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
@@ -704,7 +752,7 @@ index 344ea88..4fbeba5 100644
 +			}
 +			return projectReply{Text: strings.Join(parts, "\n\n"), Outcome: "declined", Attachments: files}, nil
 +		}
-@@ -301,0 +316,9 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
+@@ -301,0 +340,9 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 +			// Plain-text refusals can accompany completed jobs. Only classify an
 +			// otherwise empty result with one evidenced, turn-bound text bubble.
 +			if len(parts) == 1 && len(files) == 0 {
@@ -714,36 +762,48 @@ index 344ea88..4fbeba5 100644
 +					}
 +				}
 +			}
-@@ -304,3 +326,0 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
+@@ -304,3 +350,0 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 -		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
 -			return projectReply{Text: notice, Outcome: "declined"}, nil
 -		}
-@@ -426 +446,4 @@ type turnHooks struct {
+@@ -426 +470,4 @@ type turnHooks struct {
 -	accepted func()
 +	accepted        func()
 +	acceptedTurn    func(expected, requestID string)
 +	beforeSend      func(expected, requestID string) error
 +	acceptedChecked func() error
-@@ -428 +451,2 @@ type turnHooks struct {
+@@ -428 +475,2 @@ type turnHooks struct {
 -	poll func(partial string)
 +	poll   func(partial string)
 +	status func(turnStatus)
-@@ -440,0 +465,5 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -441 +489,7 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+-	if err := s.harkJSON(ctx, "POST", "/api/messages/send?cid="+url.QueryEscape(cid), cookie, payload, &accepted); err != nil {
 +	if hooks.beforeSend != nil {
 +		if err := hooks.beforeSend(expected, requestID); err != nil {
 +			return projectReply{}, err
 +		}
 +	}
-@@ -449,0 +479,8 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
++	var raw json.RawMessage
++	if err := s.harkJSON(ctx, "POST", "/api/messages/send?cid="+url.QueryEscape(cid), cookie, payload, &raw); err != nil {
+@@ -443,0 +498,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
++	if json.Unmarshal(raw, &accepted) != nil {
++		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_response_invalid", "Hark 返回非预期受理响应"}, "validate_acceptance", 200, raw, cookie)
++	}
+@@ -445 +502 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+-		return projectReply{}, &upstreamError{502, "upstream_protocol_unverified", "Hark 未确认消息受理；未自动重试发送"}
++		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_protocol_unverified", "Hark 未确认消息受理；未自动重试发送"}, "validate_acceptance", 200, raw, cookie)
+@@ -448 +505,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+-		return projectReply{}, &upstreamError{502, "upstream_project_mismatch", "Hark 未确认消息进入本次独立 Project；未自动重发"}
++		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_project_mismatch", "Hark 未确认消息进入本次独立 Project；未自动重发"}, "validate_acceptance", 200, raw, cookie)
++	}
 +	if hooks.acceptedTurn != nil {
 +		hooks.acceptedTurn(expected, requestID)
 +	}
 +	if hooks.acceptedChecked != nil {
 +		if err := hooks.acceptedChecked(); err != nil {
-+			return projectReply{}, err
++			return projectReply{}, nativeSubmissionFailure(err, "accepted_store", 200, raw, cookie)
 +		}
-+	}
-@@ -452,0 +490,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -452,0 +518,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +	var statusTracker *turnStatusTracker
 +	var statusDone chan struct{}
 +	if hooks.status != nil {
@@ -753,11 +813,11 @@ index 344ea88..4fbeba5 100644
 +		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
 +		defer func() { stopStatus(); <-statusDone }()
 +	}
-@@ -457,0 +504,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -457,0 +532,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +		if statusTracker != nil {
 +			statusTracker.history(messages)
 +		}
-@@ -462,0 +512,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -462,0 +540,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +			if statusTracker != nil {
 +				// A job can finish just before the request-level awaiting-person
 +				// patch arrives. Give the existing feed a bounded drain, not a
@@ -1067,11 +1127,19 @@ index 0000000..99d8c26
 +		}
 +	}
 +}
+diff --git a/pool.go b/pool.go
+index 16e994b..20e0257 100644
+--- a/pool.go
++++ b/pool.go
+@@ -156 +156,2 @@ func (s *Server) markAccountLocked(i int, err error) {
+-	e, _ := err.(*upstreamError)
++	var e *upstreamError
++	_ = errors.As(err, &e)
 diff --git a/project_sessions.go b/project_sessions.go
-index 8872c98..d15df11 100644
+index 8872c98..0d41068 100644
 --- a/project_sessions.go
 +++ b/project_sessions.go
-@@ -31 +31,42 @@ type projectSession struct {
+@@ -31 +31,43 @@ type projectSession struct {
 -	Busy           bool      `json:"-"`
 +	// Version 2 keeps the old sent/systems reader compatible with rollback,
 +	// while the new planner uses the unmodified client-history fingerprints.
@@ -1086,10 +1154,11 @@ index 8872c98..d15df11 100644
 +}
 +
 +type pendingProjectTurn struct {
-+	Expected  string            `json:"expected"`
-+	RequestID string            `json:"request_id"`
-+	Contract  *recoveryContract `json:"contract,omitempty"`
-+	Accepted  bool              `json:"accepted,omitempty"`
++	Expected  string             `json:"expected"`
++	RequestID string             `json:"request_id"`
++	Contract  *recoveryContract  `json:"contract,omitempty"`
++	Accepted  bool               `json:"accepted,omitempty"`
++	Failure   *submissionFailure `json:"submission_failure,omitempty"`
 +}
 +
 +func unsubmittedProject(p *projectSession) bool {
@@ -1115,26 +1184,26 @@ index 8872c98..d15df11 100644
 +		}
 +	}
 +	return false
-@@ -140,0 +182,3 @@ func (s *Server) saveProjectsLocked() error {
+@@ -140,0 +183,3 @@ func (s *Server) saveProjectsLocked() error {
 +	if len(b) > 64*1024*1024 {
 +		return errors.New("project session store exceeds safe read budget")
 +	}
-@@ -159,0 +204,3 @@ func (s *Server) loadProjects() error {
+@@ -159,0 +205,3 @@ func (s *Server) loadProjects() error {
 +		if !validRecoveryRecord(p) {
 +			return errors.New("project recovery record invalid; refusing automatic reissue")
 +		}
-@@ -171,0 +219,3 @@ type turnPlan struct {
+@@ -171,0 +220,3 @@ type turnPlan struct {
 +	// Legacy-shaped cursors are stored, not sent, for old binary readers.
 +	legacySent    []string
 +	legacySystems []string
-@@ -220 +270 @@ func planTurn(p *projectSession, messages []chatMessage) turnPlan {
+@@ -220 +271 @@ func planTurn(p *projectSession, messages []chatMessage) turnPlan {
 -	if p == nil || p.ConversationID == "" {
 +	if p == nil || p.ConversationID == "" || unsubmittedProject(p) {
-@@ -306,0 +357,3 @@ func (s *Server) cleanupProjects(now time.Time, idle time.Duration) {
+@@ -306,0 +358,3 @@ func (s *Server) cleanupProjects(now time.Time, idle time.Duration) {
 +		if p.PendingTurn != nil {
 +			continue
 +		} // An unresolved accepted/issued turn is never idle cleanup.
-@@ -364,0 +418,10 @@ func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
+@@ -364,0 +419,10 @@ func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
 +	if p.OwnerID != "" && p.OwnerID != recoveryOwner(r) {
 +		s.projectMu.Unlock()
 +		fail(w, 403, "session_owner_mismatch", "会话不属于当前调用方")
@@ -1155,10 +1224,10 @@ index bde38c0..a292d77 100644
 +	t := browserTransport(nil)
 diff --git a/recovery_delivery.go b/recovery_delivery.go
 new file mode 100644
-index 0000000..c04003a
+index 0000000..22c6756
 --- /dev/null
 +++ b/recovery_delivery.go
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,565 @@
 +package gateway
 +
 +import (
@@ -1406,6 +1475,11 @@ index 0000000..c04003a
 +}
 +
 +func validRecoveryRecord(p *projectSession) bool {
++	if p.PendingTurn != nil {
++		if !validSubmissionFailure(p.PendingTurn.Failure) || (p.PendingTurn.Failure != nil && (p.PendingTurn.Accepted || p.PendingTurn.Contract == nil)) {
++			return false
++		}
++	}
 +	if p.PendingTurn != nil && p.PendingTurn.Contract != nil {
 +		c := p.PendingTurn.Contract
 +		if p.OwnerID == "" || !validPreviewSHA(c.RequestHash) || c.ToolHash != recoveryToolHash(c.Tools) || len(c.History) == 0 {
@@ -1485,6 +1559,13 @@ index 0000000..c04003a
 +		return false
 +	}
 +	d := p.Recovery
++	if p.PendingTurn != nil && p.PendingTurn.Failure != nil && p.PendingTurn.Contract != nil && hash == p.PendingTurn.Contract.RequestHash {
++		err := p.PendingTurn.Failure.responseError()
++		s.projectMu.Unlock()
++		status, code, message := turnError(r.Context(), err)
++		fail(w, status, code, message)
++		return true
++	}
 +	if hash != d.RequestHash && hash != d.TailHash {
 +		if slices.Contains(p.RecoverySeen, hash) {
 +			s.projectMu.Unlock()
@@ -3042,10 +3123,10 @@ index 2328698..be4d42f 100644
 +	m.HandleFunc("GET /v1/sessions/{id}/result", s.sessionResult)
 diff --git a/session_result.go b/session_result.go
 new file mode 100644
-index 0000000..9f53cd3
+index 0000000..a780cbf
 --- /dev/null
 +++ b/session_result.go
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,193 @@
 +package gateway
 +
 +import (
@@ -3064,15 +3145,16 @@ index 0000000..9f53cd3
 +}
 +
 +type sessionResultData struct {
-+	ReadOnly            bool              `json:"read_only"`
-+	ContinuationApplied bool              `json:"continuation_applied"`
-+	SessionID           string            `json:"session_id"`
-+	RequestID           string            `json:"request_id"`
-+	ResponseMessageID   string            `json:"response_message_id"`
-+	Status              string            `json:"status"`
-+	ErrorCode           string            `json:"error_code"`
-+	ErrorMessage        string            `json:"error_message"`
-+	Result              sessionResultBody `json:"result"`
++	ReadOnly            bool               `json:"read_only"`
++	ContinuationApplied bool               `json:"continuation_applied"`
++	SessionID           string             `json:"session_id"`
++	RequestID           string             `json:"request_id"`
++	ResponseMessageID   string             `json:"response_message_id"`
++	Status              string             `json:"status"`
++	ErrorCode           string             `json:"error_code"`
++	ErrorMessage        string             `json:"error_message"`
++	Result              sessionResultBody  `json:"result"`
++	SubmissionFailure   *submissionFailure `json:"submission_failure,omitempty"`
 +}
 +
 +// sessionResult is an embedded diagnostic, never a model execution response.
@@ -3139,6 +3221,13 @@ index 0000000..9f53cd3
 +	}
 +	if hasPending && (pending.RequestID != requestID || pending.Expected != expected) {
 +		return sessionResultData{}, &upstreamError{409, "result_correlation_mismatch", "关联 ID 与原会话待恢复请求不一致"}
++	}
++	if hasPending && pending.Failure != nil {
++		// This is saved submission evidence, not a fabricated native result.
++		// No GET, retry, registry refresh, installation or pending clear occurs.
++		return sessionResultData{ReadOnly: true, SessionID: sessionID, RequestID: requestID, ResponseMessageID: expected,
++			Status: "submission_" + pending.Failure.Outcome, ErrorCode: pending.Failure.Code,
++			ErrorMessage: pending.Failure.Message, SubmissionFailure: pending.Failure}, nil
 +	}
 +	if a.Cookie == "" || validAccountProxy(a.Proxy) != nil {
 +		return sessionResultData{}, &upstreamError{400, "invalid_original_account", "原账号凭据或代理配置不可用；未换号"}
@@ -3694,6 +3783,514 @@ index 0000000..acc19e3
 +	client.CloseIdleConnections()
 +	if !base.closed {
 +		t.Fatal("storage client's wrapper swallowed idle connection cleanup")
++	}
++}
+diff --git a/submission_failure.go b/submission_failure.go
+new file mode 100644
+index 0000000..ca49b5c
+--- /dev/null
++++ b/submission_failure.go
+@@ -0,0 +1,142 @@
++package gateway
++
++import (
++	"encoding/json"
++	"errors"
++	"fmt"
++	"regexp"
++	"slices"
++	"strings"
++)
++
++// Evidence, not a retry/clear instruction. Older intents without this record
++// remain unknown; never infer their original HTTP response from accepted=false.
++type submissionFailure struct {
++	Outcome        string `json:"outcome"` // not_sent, rejected, uncertain
++	Phase          string `json:"phase"`
++	Code           string `json:"code"`
++	Status         int    `json:"status"`
++	NativeStatus   int    `json:"native_http_status,omitempty"`
++	Message        string `json:"message"`
++	ResponseHash   string `json:"response_prefix_sha256,omitempty"`
++	ResponseBytes  int    `json:"captured_response_bytes,omitempty"`
++	ResponseCut    bool   `json:"response_truncated,omitempty"`
++	ResponseDetail string `json:"response_excerpt,omitempty"`
++	TransportError string `json:"transport_error,omitempty"`
++}
++
++type nativeSubmissionError struct {
++	cause   error
++	failure submissionFailure
++}
++
++func (e *nativeSubmissionError) Error() string { return e.cause.Error() }
++func (e *nativeSubmissionError) Unwrap() error { return e.cause }
++
++func isNativeSubmission(method, path string) bool {
++	return method == "POST" && (path == "/api/messages/send" || strings.HasPrefix(path, "/api/messages/send?"))
++}
++
++func explicitSubmissionRejection(status int, body []byte) bool {
++	if len(body) > 65536 || !slices.Contains([]int{400, 401, 403, 413, 415, 422, 429}, status) {
++		return false
++	}
++	var v map[string]json.RawMessage
++	if json.Unmarshal(body, &v) != nil || v == nil {
++		return false // HTML/proxy errors are not a native rejection proof.
++	}
++	for _, key := range []string{"success", "accepted", "redirected"} {
++		if strings.TrimSpace(string(v[key])) == "true" {
++			return false // Contradictory acceptance evidence must stay uncertain.
++		}
++	}
++	var text string
++	if json.Unmarshal(v["error"], &text) == nil {
++		return strings.TrimSpace(text) != ""
++	}
++	var detail struct{ Code, Message string }
++	return json.Unmarshal(v["error"], &detail) == nil && (detail.Code != "" || detail.Message != "")
++}
++
++var submissionSecret = regexp.MustCompile(`(?i)(bearer\s+)[a-z0-9._~+/=-]+|("(?:cookie|authorization|api_key|password|token)"\s*:\s*)"(?:[^"\\]|\\.)*"`)
++var submissionURLSecret = regexp.MustCompile(`(?i)(https?|socks5h?)://[^/\s@]+@`)
++
++func safeSubmissionText(text, cookie string, limit int) string {
++	if cookie != "" {
++		text = strings.ReplaceAll(text, cookie, "<REDACTED>")
++		for _, item := range strings.Split(cookie, ";") {
++			_, value, ok := strings.Cut(item, "=")
++			if value = strings.TrimSpace(value); ok && len(value) >= 6 {
++				text = strings.ReplaceAll(text, value, "<REDACTED>")
++			}
++		}
++	}
++	text = submissionSecret.ReplaceAllString(text, `${1}${2}"<REDACTED>"`)
++	text = submissionURLSecret.ReplaceAllString(text, `$1://<REDACTED>@`)
++	if len(text) > limit {
++		text = text[:limit]
++	}
++	return strings.ToValidUTF8(text, "")
++}
++
++func nativeSubmissionFailure(err error, phase string, status int, body []byte, cookie string) error {
++	if err == nil {
++		return nil
++	}
++	f := submissionFailure{Outcome: "uncertain", Phase: phase, Status: 502, NativeStatus: status, Code: "upstream_error"}
++	var original *upstreamError
++	if errors.As(err, &original) {
++		f.Code, f.Status = original.code, original.status
++	}
++	if phase == "prepare" {
++		f.Outcome = "not_sent"
++	} else if phase == "response" && explicitSubmissionRejection(status, body) {
++		f.Outcome = "rejected"
++	}
++	f.Message = safeSubmissionText(err.Error(), cookie, 8192)
++	if len(body) > 0 {
++		f.ResponseCut = len(body) > 65536
++		if f.ResponseCut {
++			body = body[:65536]
++		}
++		f.ResponseBytes, f.ResponseHash = len(body), previewDigest(body)
++		f.ResponseDetail = safeSubmissionText(string(body), cookie, 8192)
++	}
++	return &nativeSubmissionError{cause: err, failure: f}
++}
++
++func (f *submissionFailure) responseError() error {
++	status, code := 409, "recovery_submission_uncertain"
++	if f.Outcome == "rejected" {
++		status, code = f.Status, "recovery_submission_rejected"
++	} else if f.Outcome == "not_sent" {
++		status, code = f.Status, "recovery_submission_not_sent"
++	}
++	return &upstreamError{status, code, fmt.Sprintf("提交状态=%s；原错误 %s（原状态%d，上游HTTP%d，阶段%s）：%s；未重试，pending保留", f.Outcome, f.Code, f.Status, f.NativeStatus, f.Phase, f.Message)}
++}
++
++func (s *Server) retainSubmissionFailure(p *projectSession, err error) error {
++	var native *nativeSubmissionError
++	f := submissionFailure{Outcome: "uncertain", Phase: "acceptance", Code: "upstream_error", Status: 502, Message: safeSubmissionText(err.Error(), "", 8192)}
++	if errors.As(err, &native) {
++		f = native.failure
++	}
++	s.projectMu.Lock()
++	defer s.projectMu.Unlock()
++	next := *p
++	pending := *p.PendingTurn
++	pending.Failure = &f
++	next.PendingTurn = &pending
++	if saveErr := s.commitRecoveryLocked(p, next); saveErr != nil {
++		return &upstreamError{503, "recovery_error_record_failed", fmt.Sprintf("原错误 %s：%s；失败证据持久化未成功，原pending保留，未重试", f.Code, f.Message)}
++	}
++	return f.responseError()
++}
++
++func validSubmissionFailure(f *submissionFailure) bool {
++	return f == nil || (slices.Contains([]string{"not_sent", "rejected", "uncertain"}, f.Outcome) && f.Code != "" && f.Phase != "" &&
++		f.Status >= 400 && f.Status <= 599 && f.NativeStatus >= 0 && f.NativeStatus <= 599 &&
++		len(f.Message) <= 8192 && len(f.ResponseDetail) <= 8192 && f.ResponseBytes >= 0 && f.ResponseBytes <= 65536 &&
++		len(f.Code) <= 128 && len(f.Phase) <= 64 && len(f.TransportError) <= 8192 &&
++		(f.ResponseHash == "" || validPreviewSHA(f.ResponseHash)))
++}
+diff --git a/submission_failure_guards_test.go b/submission_failure_guards_test.go
+new file mode 100644
+index 0000000..c590698
+--- /dev/null
++++ b/submission_failure_guards_test.go
+@@ -0,0 +1,98 @@
++package gateway
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"testing"
++)
++
++func TestSubmissionFailureEvidenceGuards(t *testing.T) {
++	for _, tc := range []struct {
++		name, body string
++		status     int
++		rejected   bool
++	}{
++		{"run-override-denied", `{"error":"run override not enabled"}`, 403, true},
++		{"structured-error", `{"error":{"code":"invalid_request","message":"fixture"}}`, 422, true},
++		{"proxy-html", `<html>403 blocked</html>`, 403, false},
++		{"contradictory-success", `{"success":true,"error":"fixture"}`, 400, false},
++		{"contradictory-accepted", `{"accepted":true,"error":"fixture"}`, 429, false},
++		{"empty-error", `{"error":null}`, 400, false},
++		{"server-after-possible-acceptance", `{"success":false,"error":"fixture"}`, 500, false},
++		{"oversized", `{"error":"` + strings.Repeat("x", 65536) + `"}`, 400, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := explicitSubmissionRejection(tc.status, []byte(tc.body)); got != tc.rejected {
++				t.Fatalf("rejection proof mismatch: %t", got)
++			}
++		})
++	}
++	t.Run("redacted-bounded-original", func(t *testing.T) {
++		body := []byte(`{"error":"fixture failure","cookie":"sid=private-fixture-token","authorization":"Bearer private-auth-token","detail":"` + strings.Repeat("x", 70000) + `"}`)
++		err := nativeSubmissionFailure(&upstreamError{502, "upstream_http_error", "original error retained"}, "response", 503, body, "sid=private-fixture-token")
++		var failure *nativeSubmissionError
++		if !errors.As(err, &failure) {
++			t.Fatal("missing typed original cause")
++		}
++		f := failure.failure
++		if f.Code != "upstream_http_error" || f.Message != "original error retained" || f.Outcome != "uncertain" || !f.ResponseCut || f.ResponseBytes != 65536 || f.ResponseHash != previewSHA(body[:65536]) {
++			t.Fatal("bounded original response provenance incorrect")
++		}
++		if len(f.ResponseDetail) > 8192 || strings.Contains(f.ResponseDetail, "private-fixture-token") || strings.Contains(f.ResponseDetail, "private-auth-token") {
++			t.Fatal("credential leaked into saved diagnostic excerpt")
++		}
++		if !validSubmissionFailure(&f) {
++			t.Fatal("valid saved evidence rejected")
++		}
++		f.Outcome = "invented-accepted"
++		if validSubmissionFailure(&f) {
++			t.Fatal("corrupt classification accepted")
++		}
++	})
++	t.Run("prepare-not-sent", func(t *testing.T) {
++		err := nativeSubmissionFailure(fmt.Errorf("synthetic local encoding failure"), "prepare", 0, nil, "")
++		var failure *nativeSubmissionError
++		if !errors.As(err, &failure) || failure.failure.Outcome != "not_sent" || failure.failure.NativeStatus != 0 {
++			t.Fatal("local preparation failure called ambiguous native acceptance")
++		}
++	})
++	t.Run("proxy-credentials-redacted", func(t *testing.T) {
++		got := safeSubmissionText("proxy socks5://fixture-user:fixture-password@127.0.0.1:9 connection failed", "", 8192)
++		if strings.Contains(got, "fixture-user") || strings.Contains(got, "fixture-password") || !strings.Contains(got, "127.0.0.1:9") {
++			t.Fatal("transport proxy credentials not redacted")
++		}
++	})
++	t.Run("partial-response-not-rejection-proof", func(t *testing.T) {
++		err := nativeSubmissionFailure(&upstreamError{400, "upstream_request_rejected", "original400"}, "read_response", 400, []byte(`{"error":"invalid_request"}`), "")
++		var failure *nativeSubmissionError
++		if !errors.As(err, &failure) || failure.failure.Outcome != "uncertain" || failure.failure.NativeStatus != 400 {
++			t.Fatal("an interrupted response was treated as a full rejection proof")
++		}
++	})
++	t.Run("wrapped-auth-stays-compatible", func(t *testing.T) {
++		err := nativeSubmissionFailure(&upstreamError{502, "upstream_access_blocked", "original blocked detail"}, "response", 403, []byte(`{"error":"blocked"}`), "")
++		if !isAuthError(err) {
++			t.Fatal("typed provenance broke existing auth classification")
++		}
++		s := &Server{accounts: []Account{{ID: "fixture"}}}
++		s.markAccountLocked(0, err)
++		if s.accounts[0].Status != "blocked" || s.accounts[0].Detail != "original blocked detail" {
++			t.Fatal("wrapped 403 was changed to an expired 401")
++		}
++	})
++	t.Run("canceled-send-keeps-real-transport-error", func(t *testing.T) {
++		s, err := NewEmbedded(t.TempDir(), Options{Upstream: "http://127.0.0.1:1"})
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, cancel := context.WithCancel(context.Background())
++		cancel()
++		err = s.harkJSON(ctx, "POST", "/api/messages/send?cid=fixture", "fixture-cookie", map[string]string{"message": "fixture"}, nil)
++		var failure *nativeSubmissionError
++		if !errors.As(err, &failure) || failure.failure.Outcome != "uncertain" || failure.failure.Phase != "send" || !strings.Contains(failure.failure.TransportError, "context canceled") {
++			t.Fatal("transport error was lost or guessed as rejection")
++		}
++	})
++}
+diff --git a/submission_failure_storage_test.go b/submission_failure_storage_test.go
+new file mode 100644
+index 0000000..f4bb33e
+--- /dev/null
++++ b/submission_failure_storage_test.go
+@@ -0,0 +1,122 @@
++package gateway
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++)
++
++func TestSubmissionFailureStorageAndLegacy(t *testing.T) {
++	for _, accepted := range []bool{false, true} {
++		name := "rejection-evidence-save-fails"
++		if accepted {
++			name = "accepted-ack-save-fails"
++		}
++		t.Run(name, func(t *testing.T) {
++			dir := t.TempDir()
++			posts := 0
++			var s *Server
++			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				w.Header().Set("Content-Type", "application/json")
++				switch r.URL.Path {
++				case "/api/conversations":
++					_, _ = w.Write([]byte(`{"conversationId":"storage-original-project"}`))
++				case "/api/messages/send":
++					posts++
++					var input map[string]any
++					_ = json.NewDecoder(r.Body).Decode(&input)
++					// Initial intent has already been written. Fail only the
++					// subsequent acknowledgment/evidence save, not the POST.
++					s.data = filepath.Join(dir, "missing-parent")
++					if accepted {
++						_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "storage-original-project", "messageId": input["idempotencyKey"], "redirected": false})
++					} else {
++						w.WriteHeader(400)
++						_, _ = w.Write([]byte(`{"error":"invalid_request"}`))
++					}
++				default:
++					_, _ = w.Write([]byte(`{}`))
++				}
++			}))
++			defer up.Close()
++			var err error
++			s, err = NewEmbedded(dir, Options{Upstream: up.URL})
++			if err != nil {
++				t.Fatal(err)
++			}
++			path, body := previewRequest("responses", false)
++			post := func() *httptest.ResponseRecorder {
++				r := httptest.NewRequest("POST", path, strings.NewReader(body))
++				r.Header.Set("X-Hark-Session-Id", "storage-session")
++				r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: "fixture-account", Cookie: "fixture-cookie"}))
++				w := httptest.NewRecorder()
++				s.CallerHandler("fixture-owner").ServeHTTP(w, r)
++				return w
++			}
++			first := post()
++			cause := "upstream_request_rejected"
++			if accepted {
++				cause = "recovery_store_failed"
++			}
++			if first.Code != 503 || !strings.Contains(first.Body.String(), "recovery_error_record_failed") || !strings.Contains(first.Body.String(), cause) {
++				t.Fatalf("save failure lost original cause: %d %s", first.Code, first.Body)
++			}
++			// The only successful durable write was the original intent.
++			raw, _ := os.ReadFile(filepath.Join(dir, "project-sessions.json"))
++			var records map[string]map[string]any
++			_ = json.Unmarshal(raw, &records)
++			for _, row := range records {
++				pending, _ := row["pending_turn"].(map[string]any)
++				if pending == nil || pending["accepted"] == true || pending["submission_failure"] != nil {
++					t.Fatal("failed save invented acknowledgment or evidence")
++				}
++			}
++			s, err = NewEmbedded(dir, Options{Upstream: up.URL})
++			if err != nil {
++				t.Fatal(err)
++			}
++			again := post()
++			if again.Code != 409 || !strings.Contains(again.Body.String(), "session_turn_pending") || posts != 1 {
++				t.Fatalf("restart cleared or replayed unknown intent: %d posts=%d %s", again.Code, posts, again.Body)
++			}
++		})
++	}
++	t.Run("tail-error-repeated-keeps-cause", func(t *testing.T) {
++		x := issuedDurable(t)
++		w := x.post("fixture-key-A", x.path, x.body, false)
++		id := regexp.MustCompile(`call_[a-f0-9]+`).FindString(w.Body.String())
++		body := durableTail("responses", x.body, id)
++		x.tailFailure = 503
++		w = x.post("fixture-key-A", x.path, body, false)
++		if w.Code != 409 || !strings.Contains(w.Body.String(), "upstream_http_error") {
++			t.Fatal(w.Body)
++		}
++		x.restart()
++		w = x.post("fixture-key-A", x.path, body, false)
++		if w.Code != 409 || !strings.Contains(w.Body.String(), "upstream_http_error") || x.sends != 2 {
++			t.Fatal("old delivery guard masked tail error or replayed it")
++		}
++	})
++	t.Run("old-record-stays-unknown", func(t *testing.T) {
++		x := newDurableRig(t, "responses", false)
++		x.post("fixture-key-A", x.path, x.body, false)
++		for _, p := range x.s.projects {
++			// Simulate a pre-candidate unconfirmed intent without evidence.
++			p.PendingTurn.Accepted = false
++			p.PendingTurn.Failure = nil
++		}
++		if err := x.s.persistProjects(); err != nil {
++			t.Fatal(err)
++		}
++		x.restart()
++		w := x.post("fixture-key-A", x.path, x.body, false)
++		if w.Code != 409 || !strings.Contains(w.Body.String(), "session_turn_pending") || x.sends != 1 {
++			t.Fatal("legacy cause invented or old intent replayed")
++		}
++	})
++}
+diff --git a/submission_failure_test.go b/submission_failure_test.go
+new file mode 100644
+index 0000000..e6e0c4a
+--- /dev/null
++++ b/submission_failure_test.go
+@@ -0,0 +1,122 @@
++package gateway
++
++import (
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// This slice deliberately retains pending. It must not silently turn a
++// classification/provenance fix into permission to retry an original task.
++func TestSubmissionFailureClassification(t *testing.T) {
++	for _, protocol := range []string{"chat", "responses", "messages"} {
++		for _, stream := range []bool{false, true} {
++			for _, tc := range []struct {
++				name, body, outcome, cause string
++				native, status             int
++			}{
++				{"explicit400", `{"error":"invalid_request","message":"fixture detail"}`, "rejected", "upstream_request_rejected", 400, 400},
++				{"explicit401", `{"error":"unauthorized"}`, "rejected", "upstream_session_expired", 401, 502},
++				{"explicit429", `{"error":"rate_limited"}`, "rejected", "upstream_rate_limited", 429, 429},
++				{"ambiguous503", `{"error":"synthetic response lost after possible acceptance"}`, "uncertain", "upstream_http_error", 503, 409},
++				{"invalid200", `not-json`, "uncertain", "upstream_response_invalid", 200, 409},
++				{"wrongAck200", `{"success":true,"conversationId":"another-project","messageId":"other","redirected":false}`, "uncertain", "upstream_project_mismatch", 200, 409},
++			} {
++				t.Run(fmt.Sprintf("%s/stream=%t/%s", protocol, stream, tc.name), func(t *testing.T) {
++					posts, history := 0, 0
++					up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++						w.Header().Set("Content-Type", "application/json")
++						switch r.URL.Path {
++						case "/api/conversations":
++							_, _ = w.Write([]byte(`{"conversationId":"submission-original-project"}`))
++						case "/api/messages/send":
++							posts++
++							w.WriteHeader(tc.native)
++							_, _ = w.Write([]byte(tc.body))
++						case "/api/messages/history":
++							history++
++							_, _ = w.Write([]byte(`{"messages":[]}`))
++						default:
++							_, _ = w.Write([]byte(`{}`))
++						}
++					}))
++					defer up.Close()
++					dir := t.TempDir()
++					newServer := func() *Server {
++						s, err := NewEmbedded(dir, Options{Upstream: up.URL})
++						if err != nil {
++							t.Fatal(err)
++						}
++						return s
++					}
++					s := newServer()
++					path, body := previewRequest(protocol, stream)
++					request := func(s *Server, method, path, body string) *httptest.ResponseRecorder {
++						r := httptest.NewRequest(method, path, strings.NewReader(body))
++						r.Header.Set("X-Hark-Session-Id", "submission-session")
++						r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: "fixture-account", Cookie: "fixture-cookie"}))
++						w := httptest.NewRecorder()
++						s.CallerHandler("fixture-owner").ServeHTTP(w, r)
++						return w
++					}
++					first := request(s, "POST", path, body)
++					if first.Code != tc.status {
++						t.Fatalf("classification HTTP mismatch: want=%d actual=%d %s", tc.status, first.Code, first.Body)
++					}
++					file := filepath.Join(dir, "project-sessions.json")
++					raw, err := os.ReadFile(file)
++					if err != nil {
++						t.Fatal(err)
++					}
++					var rows map[string]map[string]any
++					if err := json.Unmarshal(raw, &rows); err != nil {
++						t.Fatal(err)
++					}
++					for _, row := range rows {
++						pending, ok := row["pending_turn"].(map[string]any)
++						if !ok || pending["accepted"] == true {
++							t.Fatal("classification cleared pending or invented acceptance")
++						}
++						failure, ok := pending["submission_failure"].(map[string]any)
++						if !ok || failure["outcome"] != tc.outcome || failure["code"] != tc.cause || failure["native_http_status"] != float64(tc.native) {
++							t.Fatalf("original cause/classification missing: %s", raw)
++						}
++						if failure["response_prefix_sha256"] != previewSHA([]byte(tc.body)) || failure["response_excerpt"] != tc.body {
++							t.Fatal("original response provenance was lost")
++						}
++						if !strings.Contains(first.Body.String(), tc.cause) {
++							t.Fatal("first client error masked original cause code")
++						}
++						if row["conversation_id"] != "submission-original-project" || row["owner_id"] != "fixture-owner" {
++							t.Fatal("classification changed original association")
++						}
++					}
++					s = newServer()
++					// An administrator can read saved failure evidence without a
++					// native history request or any state transition.
++					diagnostic := request(s, "GET", "/v1/sessions/submission-session/result", "")
++					if diagnostic.Code != 200 || !strings.Contains(diagnostic.Body.String(), `"submission_failure"`) || !strings.Contains(diagnostic.Body.String(), tc.cause) {
++						t.Fatalf("saved failure diagnosis unavailable: %d %s", diagnostic.Code, diagnostic.Body)
++					}
++					after, _ := os.ReadFile(file)
++					if string(raw) != string(after) {
++						t.Fatal("read-only diagnosis changed pending/context bytes")
++					}
++					again := request(s, "POST", path, body)
++					if again.Code != tc.status || !strings.Contains(again.Body.String(), tc.cause) {
++						t.Fatalf("restart lost original failure: %d %s", again.Code, again.Body)
++					}
++					if posts != 1 || history != 0 {
++						t.Fatalf("classification/receipt read replayed or contacted native history: posts=%d history=%d", posts, history)
++					}
++					t.Logf("SUBMISSION_PROVENANCE outcome=%s cause=%s native=%d outward=%d posts=1 pending_kept=true restart=true read_only_native_GETs=0", tc.outcome, tc.cause, tc.native, tc.status)
++				})
++			}
++		}
 +	}
 +}
 diff --git a/testdata/backend_refusal_history.json b/testdata/backend_refusal_history.json

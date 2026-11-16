@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,8 +24,8 @@ func (e *upstreamError) Error() string { return e.message }
 // isAuthError reports a credential problem (HTTP 401/403 other than an
 // explicit feature rejection). Only these trigger account failover.
 func isAuthError(err error) bool {
-	e, ok := err.(*upstreamError)
-	return ok && (e.code == "upstream_session_expired" || e.code == "upstream_access_blocked")
+	var e *upstreamError
+	return errors.As(err, &e) && (e.code == "upstream_session_expired" || e.code == "upstream_access_blocked")
 }
 
 func uuid() string {
@@ -44,7 +45,18 @@ func (s *Server) harkJSON(ctx context.Context, method, path, cookie string, inpu
 	return s.harkJSONLimit(ctx, method, path, cookie, input, output, defaultJSONLimit)
 }
 
-func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string, input, output any, limit int64) error {
+func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string, input, output any, limit int64) (failure error) {
+	phase, status := "prepare", 0
+	var responseBody []byte
+	var transportError string
+	if isNativeSubmission(method, path) {
+		defer func() {
+			failure = nativeSubmissionFailure(failure, phase, status, responseBody, cookie)
+			if native, ok := failure.(*nativeSubmissionError); ok {
+				native.failure.TransportError = safeSubmissionText(transportError, cookie, 8192)
+			}
+		}()
+	}
 	var body io.Reader
 	if input != nil {
 		b, err := json.Marshal(input)
@@ -67,13 +79,20 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 	if limit > defaultJSONLimit {
 		timeout = 0 // bounded by ctx; large history reads may take longer
 	}
+	phase = "send"
 	resp, err := s.clientFor(cookie, timeout, false).Do(req)
 	if err != nil {
+		transportError = err.Error()
 		return &upstreamError{502, "upstream_connection_failed", "Hark 连接失败"}
 	}
 	defer resp.Body.Close()
+	phase, status = "response", resp.StatusCode
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 65537))
+		responseBody = body
+		if readErr != nil {
+			phase, transportError = "read_response", readErr.Error()
+		}
 		var rejection struct {
 			Error string `json:"error"`
 		}
@@ -100,8 +119,13 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 	if output == nil {
 		return nil
 	}
+	phase = "decode_response"
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	responseBody = b
 	if err != nil || int64(len(b)) > limit {
+		if err != nil {
+			transportError = err.Error()
+		}
 		return &upstreamError{502, "upstream_response_invalid", "Hark 响应读取失败或内容过长"}
 	}
 	if json.Unmarshal(b, output) != nil {
@@ -467,21 +491,25 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 			return projectReply{}, err
 		}
 	}
-	if err := s.harkJSON(ctx, "POST", "/api/messages/send?cid="+url.QueryEscape(cid), cookie, payload, &accepted); err != nil {
+	var raw json.RawMessage
+	if err := s.harkJSON(ctx, "POST", "/api/messages/send?cid="+url.QueryEscape(cid), cookie, payload, &raw); err != nil {
 		return projectReply{}, err
 	}
+	if json.Unmarshal(raw, &accepted) != nil {
+		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_response_invalid", "Hark 返回非预期受理响应"}, "validate_acceptance", 200, raw, cookie)
+	}
 	if accepted.Success == nil || !*accepted.Success {
-		return projectReply{}, &upstreamError{502, "upstream_protocol_unverified", "Hark 未确认消息受理；未自动重试发送"}
+		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_protocol_unverified", "Hark 未确认消息受理；未自动重试发送"}, "validate_acceptance", 200, raw, cookie)
 	}
 	if accepted.ConversationID != cid || accepted.MessageID != requestID || accepted.Redirected == nil || *accepted.Redirected {
-		return projectReply{}, &upstreamError{502, "upstream_project_mismatch", "Hark 未确认消息进入本次独立 Project；未自动重发"}
+		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_project_mismatch", "Hark 未确认消息进入本次独立 Project；未自动重发"}, "validate_acceptance", 200, raw, cookie)
 	}
 	if hooks.acceptedTurn != nil {
 		hooks.acceptedTurn(expected, requestID)
 	}
 	if hooks.acceptedChecked != nil {
 		if err := hooks.acceptedChecked(); err != nil {
-			return projectReply{}, err
+			return projectReply{}, nativeSubmissionFailure(err, "accepted_store", 200, raw, cookie)
 		}
 	}
 	if hooks.accepted != nil {
