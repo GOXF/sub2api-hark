@@ -687,7 +687,7 @@ index 0000000..5ce9af3
 +	}
 +}
 diff --git a/direct_chat.go b/direct_chat.go
-index 344ea88..ff1c421 100644
+index 344ea88..6e54265 100644
 --- a/direct_chat.go
 +++ b/direct_chat.go
 @@ -7,0 +8 @@ import (
@@ -724,22 +724,27 @@ index 344ea88..ff1c421 100644
 +		if readErr != nil {
 +			phase, transportError = "read_response", readErr.Error()
 +		}
-@@ -102,0 +122 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
+@@ -89,0 +109,4 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
++		case 402:
++			if readErr == nil && explicitSubmissionRejection(resp.StatusCode, body) {
++				status, code, message = 402, "upstream_quota_exhausted", "Hark 上游账号额度已用尽（HTTP 402）"
++			}
+@@ -102,0 +126 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 +	phase = "decode_response"
-@@ -103,0 +124 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
+@@ -103,0 +128 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 +	responseBody = b
-@@ -104,0 +126,3 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
+@@ -104,0 +130,3 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 +		if err != nil {
 +			transportError = err.Error()
 +		}
-@@ -135,2 +159,4 @@ type harkMessage struct {
+@@ -135,2 +163,4 @@ type harkMessage struct {
 -	Onboarding  json.RawMessage `json:"onboarding"`
 -	Attachments []harkFile      `json:"attachments"`
 +	Onboarding  json.RawMessage  `json:"onboarding"`
 +	Narration   *statusNarration `json:"narration"`
 +	InputNeeded bool             `json:"inputNeeded"`
 +	Attachments []harkFile       `json:"attachments"`
-@@ -300,0 +327,12 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
+@@ -300,0 +331,12 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 +		// A native, turn-bound refusal takes precedence over explanatory text.
 +		// Keep both original parts; never replace a refusal with a success body.
 +		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
@@ -752,7 +757,7 @@ index 344ea88..ff1c421 100644
 +			}
 +			return projectReply{Text: strings.Join(parts, "\n\n"), Outcome: "declined", Attachments: files}, nil
 +		}
-@@ -301,0 +340,9 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
+@@ -301,0 +344,9 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 +			// Plain-text refusals can accompany completed jobs. Only classify an
 +			// otherwise empty result with one evidenced, turn-bound text bubble.
 +			if len(parts) == 1 && len(files) == 0 {
@@ -762,21 +767,21 @@ index 344ea88..ff1c421 100644
 +					}
 +				}
 +			}
-@@ -304,3 +350,0 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
+@@ -304,3 +354,0 @@ func completedProjectReply(messages []harkMessage, expected, requestID string) (
 -		if notice := declinedNoticeForTurn(messages, expected, requestID); notice != "" {
 -			return projectReply{Text: notice, Outcome: "declined"}, nil
 -		}
-@@ -426 +470,4 @@ type turnHooks struct {
+@@ -426 +474,4 @@ type turnHooks struct {
 -	accepted func()
 +	accepted        func()
 +	acceptedTurn    func(expected, requestID string)
 +	beforeSend      func(expected, requestID string) error
 +	acceptedChecked func() error
-@@ -428 +475,2 @@ type turnHooks struct {
+@@ -428 +479,2 @@ type turnHooks struct {
 -	poll func(partial string)
 +	poll   func(partial string)
 +	status func(turnStatus)
-@@ -441 +489,7 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -441 +493,7 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 -	if err := s.harkJSON(ctx, "POST", "/api/messages/send?cid="+url.QueryEscape(cid), cookie, payload, &accepted); err != nil {
 +	if hooks.beforeSend != nil {
 +		if err := hooks.beforeSend(expected, requestID); err != nil {
@@ -785,14 +790,14 @@ index 344ea88..ff1c421 100644
 +	}
 +	var raw json.RawMessage
 +	if err := s.harkJSON(ctx, "POST", "/api/messages/send?cid="+url.QueryEscape(cid), cookie, payload, &raw); err != nil {
-@@ -443,0 +498,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -443,0 +502,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +	if json.Unmarshal(raw, &accepted) != nil {
 +		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_response_invalid", "Hark 返回非预期受理响应"}, "validate_acceptance", 200, raw, cookie)
 +	}
-@@ -445 +502 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -445 +506 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 -		return projectReply{}, &upstreamError{502, "upstream_protocol_unverified", "Hark 未确认消息受理；未自动重试发送"}
 +		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_protocol_unverified", "Hark 未确认消息受理；未自动重试发送"}, "validate_acceptance", 200, raw, cookie)
-@@ -448 +505,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -448 +509,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 -		return projectReply{}, &upstreamError{502, "upstream_project_mismatch", "Hark 未确认消息进入本次独立 Project；未自动重发"}
 +		return projectReply{}, nativeSubmissionFailure(&upstreamError{502, "upstream_project_mismatch", "Hark 未确认消息进入本次独立 Project；未自动重发"}, "validate_acceptance", 200, raw, cookie)
 +	}
@@ -803,7 +808,7 @@ index 344ea88..ff1c421 100644
 +		if err := hooks.acceptedChecked(); err != nil {
 +			return projectReply{}, nativeSubmissionFailure(err, "accepted_store", 200, raw, cookie)
 +		}
-@@ -452,0 +518,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -452,0 +522,9 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +	var statusTracker *turnStatusTracker
 +	var statusDone chan struct{}
 +	if hooks.status != nil {
@@ -813,11 +818,11 @@ index 344ea88..ff1c421 100644
 +		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
 +		defer func() { stopStatus(); <-statusDone }()
 +	}
-@@ -457,0 +532,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -457,0 +536,3 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +		if statusTracker != nil {
 +			statusTracker.history(messages)
 +		}
-@@ -462,0 +540,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
+@@ -462,0 +544,16 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 +			if statusTracker != nil {
 +				// A job can finish just before the request-level awaiting-person
 +				// patch arrives. Give the existing feed a bounded drain, not a
@@ -3787,10 +3792,10 @@ index 0000000..acc19e3
 +}
 diff --git a/submission_failure.go b/submission_failure.go
 new file mode 100644
-index 0000000..ca49b5c
+index 0000000..c63f23b
 --- /dev/null
 +++ b/submission_failure.go
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,148 @@
 +package gateway
 +
 +import (
@@ -3831,7 +3836,7 @@ index 0000000..ca49b5c
 +}
 +
 +func explicitSubmissionRejection(status int, body []byte) bool {
-+	if len(body) > 65536 || !slices.Contains([]int{400, 401, 403, 413, 415, 422, 429}, status) {
++	if len(body) > 65536 || !slices.Contains([]int{400, 401, 402, 403, 413, 415, 422, 429}, status) {
 +		return false
 +	}
 +	var v map[string]json.RawMessage
@@ -3842,6 +3847,12 @@ index 0000000..ca49b5c
 +		if strings.TrimSpace(string(v[key])) == "true" {
 +			return false // Contradictory acceptance evidence must stay uncertain.
 +		}
++	}
++	if status == 402 {
++		// Payment status alone is not proof that the native send was rejected.
++		var code, reason string
++		return json.Unmarshal(v["code"], &code) == nil && code == "token_limit_reached" &&
++			json.Unmarshal(v["error"], &reason) == nil && strings.TrimSpace(reason) != ""
 +	}
 +	var text string
 +	if json.Unmarshal(v["error"], &text) == nil {
@@ -4167,10 +4178,10 @@ index 0000000..f4bb33e
 +}
 diff --git a/submission_failure_test.go b/submission_failure_test.go
 new file mode 100644
-index 0000000..e6e0c4a
+index 0000000..56781c3
 --- /dev/null
 +++ b/submission_failure_test.go
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,131 @@
 +package gateway
 +
 +import (
@@ -4187,6 +4198,10 @@ index 0000000..e6e0c4a
 +// This slice deliberately retains pending. It must not silently turn a
 +// classification/provenance fix into permission to retry an original task.
 +func TestSubmissionFailureClassification(t *testing.T) {
++	quotaBody, err := os.ReadFile("testdata/submission_token_limit_402.json")
++	if err != nil {
++		t.Fatal(err)
++	}
 +	for _, protocol := range []string{"chat", "responses", "messages"} {
 +		for _, stream := range []bool{false, true} {
 +			for _, tc := range []struct {
@@ -4196,6 +4211,11 @@ index 0000000..e6e0c4a
 +				{"explicit400", `{"error":"invalid_request","message":"fixture detail"}`, "rejected", "upstream_request_rejected", 400, 400},
 +				{"explicit401", `{"error":"unauthorized"}`, "rejected", "upstream_session_expired", 401, 502},
 +				{"explicit429", `{"error":"rate_limited"}`, "rejected", "upstream_rate_limited", 429, 429},
++				{"nativeMonthlyQuota402", string(quotaBody), "rejected", "upstream_quota_exhausted", 402, 402},
++				{"unknown402", `{"error":"Payment required","code":"unknown"}`, "uncertain", "upstream_http_error", 402, 409},
++				{"quotaWordsOnly402", `{"error":"monthly quota exhausted"}`, "uncertain", "upstream_http_error", 402, 409},
++				{"proxy402", `<html>Payment required</html>`, "uncertain", "upstream_http_error", 402, 409},
++				{"contradictoryQuota402", `{"error":"quota exhausted","code":"token_limit_reached","accepted":true}`, "uncertain", "upstream_http_error", 402, 409},
 +				{"ambiguous503", `{"error":"synthetic response lost after possible acceptance"}`, "uncertain", "upstream_http_error", 503, 409},
 +				{"invalid200", `not-json`, "uncertain", "upstream_response_invalid", 200, 409},
 +				{"wrongAck200", `{"success":true,"conversationId":"another-project","messageId":"other","redirected":false}`, "uncertain", "upstream_project_mismatch", 200, 409},
@@ -4292,6 +4312,169 @@ index 0000000..e6e0c4a
 +			}
 +		}
 +	}
++}
+diff --git a/submission_quota_test.go b/submission_quota_test.go
+new file mode 100644
+index 0000000..d101f4f
+--- /dev/null
++++ b/submission_quota_test.go
+@@ -0,0 +1,157 @@
++package gateway
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++)
++
++func TestSubmissionQuota402Evidence(t *testing.T) {
++	for _, tc := range []struct {
++		name, body string
++		rejected   bool
++	}{
++		{"known-native-code", `{"code":"token_limit_reached","error":"quota exhausted"}`, true},
++		{"no-code", `{"error":"quota exhausted"}`, false},
++		{"unknown-code", `{"code":"payment_required","error":"quota exhausted"}`, false},
++		{"nested-code-only", `{"error":{"code":"token_limit_reached","message":"quota exhausted"}}`, false},
++		{"empty-error", `{"code":"token_limit_reached","error":" "}`, false},
++		{"null-error", `{"code":"token_limit_reached","error":null}`, false},
++		{"wrong-error-shape", `{"code":"token_limit_reached","error":{"message":"quota exhausted"}}`, false},
++		{"contradictory-success", `{"code":"token_limit_reached","error":"quota exhausted","success":true}`, false},
++		{"contradictory-accepted", `{"code":"token_limit_reached","error":"quota exhausted","accepted":true}`, false},
++		{"contradictory-redirected", `{"code":"token_limit_reached","error":"quota exhausted","redirected":true}`, false},
++		{"malformed", `{"code":"token_limit_reached","error":"quota exhausted"`, false},
++		{"html", `<html>token_limit_reached</html>`, false},
++		{"oversized", `{"code":"token_limit_reached","error":"` + strings.Repeat("x", 65536) + `"}`, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := explicitSubmissionRejection(402, []byte(tc.body)); got != tc.rejected {
++				t.Fatalf("quota rejection proof: got=%t want=%t", got, tc.rejected)
++			}
++		})
++	}
++}
++
++func TestSubmissionQuota402PartialResponse(t *testing.T) {
++	body := `{"code":"token_limit_reached","error":"quota exhausted"}`
++	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Length", strconv.Itoa(len(body)+10))
++		w.WriteHeader(402)
++		_, _ = w.Write([]byte(body))
++	}))
++	defer up.Close()
++	s, err := NewEmbedded(t.TempDir(), Options{Upstream: up.URL})
++	if err != nil {
++		t.Fatal(err)
++	}
++	err = s.harkJSON(context.Background(), "POST", "/api/messages/send", "fixture-cookie", map[string]string{"message": "fixture"}, nil)
++	var native *nativeSubmissionError
++	if !errors.As(err, &native) || native.failure.Outcome != "uncertain" || native.failure.Phase != "read_response" || native.failure.Code != "upstream_http_error" || native.failure.NativeStatus != 402 || native.failure.TransportError == "" {
++		t.Fatalf("partial quota response became a full rejection: %v", err)
++	}
++}
++
++func TestSubmissionQuota402LegacyPendingPreserved(t *testing.T) {
++	quotaBody, err := os.ReadFile("testdata/submission_token_limit_402.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	posts, history := 0, 0
++	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/api/conversations":
++			_, _ = w.Write([]byte(`{"conversationId":"quota-original-project"}`))
++		case "/api/messages/send":
++			posts++
++			w.WriteHeader(402)
++			_, _ = w.Write(quotaBody)
++		case "/api/messages/history":
++			history++
++			_, _ = w.Write([]byte(`{"messages":[]}`))
++		default:
++			_, _ = w.Write([]byte(`{}`))
++		}
++	}))
++	defer up.Close()
++	dir := t.TempDir()
++	newServer := func() *Server {
++		s, err := NewEmbedded(dir, Options{Upstream: up.URL})
++		if err != nil {
++			t.Fatal(err)
++		}
++		return s
++	}
++	path, body := previewRequest("responses", false)
++	request := func(s *Server, method, path, body string) *httptest.ResponseRecorder {
++		r := httptest.NewRequest(method, path, strings.NewReader(body))
++		r.Header.Set("X-Hark-Session-Id", "quota-legacy-session")
++		r = r.WithContext(WithEmbeddedAccount(r.Context(), SourceAccount{ID: "fixture-account", Cookie: "fixture-cookie"}))
++		w := httptest.NewRecorder()
++		s.CallerHandler("fixture-owner").ServeHTTP(w, r)
++		return w
++	}
++	request(newServer(), "POST", path, body)
++	file := filepath.Join(dir, "project-sessions.json")
++	raw, err := os.ReadFile(file)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var rows map[string]map[string]any
++	if err := json.Unmarshal(raw, &rows); err != nil || len(rows) != 1 {
++		t.Fatalf("expected one fixture session: %s %v", raw, err)
++	}
++	for _, row := range rows {
++		pending := row["pending_turn"].(map[string]any)
++		failure := pending["submission_failure"].(map[string]any)
++		// Model a pre-fix saved402. Loading new code must not upgrade it in place.
++		failure["outcome"], failure["code"], failure["status"] = "uncertain", "upstream_http_error", 502
++		failure["message"] = "Hark 返回 HTTP 402"
++	}
++	before, err := json.Marshal(rows)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(file, before, 0600); err != nil {
++		t.Fatal(err)
++	}
++	s := newServer()
++	diagnostic := request(s, "GET", "/v1/sessions/quota-legacy-session/result", "")
++	if diagnostic.Code != 200 || !strings.Contains(diagnostic.Body.String(), `"submission_uncertain"`) {
++		t.Fatalf("saved402 was reclassified: %d %s", diagnostic.Code, diagnostic.Body)
++	}
++	readOnly, err := os.ReadFile(file)
++	if err != nil || string(readOnly) != string(before) {
++		t.Fatal("read-only diagnosis changed stored pending bytes")
++	}
++	again := request(s, "POST", path, body)
++	if again.Code != 409 || !strings.Contains(again.Body.String(), "upstream_http_error") {
++		t.Fatalf("old pending was silently repaired or retried: %d %s", again.Code, again.Body)
++	}
++	after, err := os.ReadFile(file)
++	if err != nil || posts != 1 || history != 0 {
++		t.Fatalf("old pending changed/replayed: posts=%d history=%d read_error=%v", posts, history, err)
++	}
++	var actual map[string]map[string]any
++	if err := json.Unmarshal(after, &actual); err != nil {
++		t.Fatal(err)
++	}
++	// A denied POST still refreshes last_used; pending, identity and cursors must not change.
++	for id, row := range rows {
++		delete(row, "last_used")
++		delete(actual[id], "last_used")
++	}
++	expected, _ := json.Marshal(rows)
++	got, _ := json.Marshal(actual)
++	if string(got) != string(expected) {
++		t.Fatalf("legacy pending/context changed: before=%s after=%s", expected, got)
++	}
++	t.Log("LEGACY_QUOTA_PENDING context_unchanged=true readonly_bytes_identical=true native_POSTs=1 history_GETs=0 old_outcome=uncertain outward=409")
 +}
 diff --git a/testdata/backend_refusal_history.json b/testdata/backend_refusal_history.json
 new file mode 100644
@@ -4823,6 +5006,13 @@ index 0000000..f35fb76
 +    "history_sha256": "37a96a92e84e8b5a437c7270ea2e410050ad0fb8c05c701302557617118213c3"
 +  }
 +}
+diff --git a/testdata/submission_token_limit_402.json b/testdata/submission_token_limit_402.json
+new file mode 100644
+index 0000000..4f4946a
+--- /dev/null
++++ b/testdata/submission_token_limit_402.json
+@@ -0,0 +1 @@
++{"autoTopupPending":false,"bound":"pool","code":"token_limit_reached","error":"You've reached your plan's usage limit.","feature":"message","limit":375000,"limitCopy":{"case":"month","headline":"You’ve reached your monthly limit.","detail":"Upgrade to Hark Pro² to continue.","offer":{"kind":"upgrade","planId":"pro","store":"","fromFree":true}},"planId":"free","planName":"Hark Pro","resetsAt":"2026-11-19T04:12:51Z","used":1407221}
 diff --git a/testdata/turn_status_trace.json b/testdata/turn_status_trace.json
 new file mode 100644
 index 0000000..d4762be

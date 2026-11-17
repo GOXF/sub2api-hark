@@ -38,7 +38,7 @@ func isNativeSubmission(method, path string) bool {
 }
 
 func explicitSubmissionRejection(status int, body []byte) bool {
-	if len(body) > 65536 || !slices.Contains([]int{400, 401, 403, 413, 415, 422, 429}, status) {
+	if len(body) > 65536 || !slices.Contains([]int{400, 401, 402, 403, 413, 415, 422, 429}, status) {
 		return false
 	}
 	var v map[string]json.RawMessage
@@ -49,6 +49,12 @@ func explicitSubmissionRejection(status int, body []byte) bool {
 		if strings.TrimSpace(string(v[key])) == "true" {
 			return false // Contradictory acceptance evidence must stay uncertain.
 		}
+	}
+	if status == 402 {
+		// Payment status alone is not proof that the native send was rejected.
+		var code, reason string
+		return json.Unmarshal(v["code"], &code) == nil && code == "token_limit_reached" &&
+			json.Unmarshal(v["error"], &reason) == nil && strings.TrimSpace(reason) != ""
 	}
 	var text string
 	if json.Unmarshal(v["error"], &text) == nil {
