@@ -106,6 +106,10 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 			status, code, message = resp.StatusCode, "upstream_request_rejected", fmt.Sprintf("Hark 拒绝转发的请求参数（HTTP %d）", resp.StatusCode)
 		case 401:
 			code, message = "upstream_session_expired", "Hark 登录会话已失效，请重新导入 Cookie"
+		case 402:
+			if readErr == nil && explicitSubmissionRejection(resp.StatusCode, body) {
+				status, code, message = 402, "upstream_quota_exhausted", "Hark 上游账号额度已用尽（HTTP 402）"
+			}
 		case 403:
 			code, message = "upstream_access_blocked", "Hark 返回 HTTP 403，访问受阻（"+upstreamDiag(method, path, resp, body, s.routeDiag(cookie))+"）"
 		case 429:

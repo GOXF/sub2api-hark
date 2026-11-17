@@ -5,6 +5,7 @@
 `codex/hark-submission-outcome-20261116` 仅在本地补充分类，不改变下面已发布协议的回执、清除或重试权限。
 
 - 新增 `pending_turn.submission_failure`，保存 `outcome`（`not_sent` / `rejected` / `uncertain`）、提交阶段、原错误代码/语义状态、实际上游 HTTP 状态、脱敏原错误/传输错误、响应前缀 SHA256 与有界摘要。响应最多取前 64 KiB，文本摘要最多 8 KiB；凭据脱敏。哈希属于捕获前缀，不冒称无限长原响应的完整哈希。
+- 原生 HTTP 402 只有完整 JSON 中 `code=token_limit_reached`、`error` 为非空字符串且无 `success/accepted/redirected=true` 冲突时才判为 `rejected`，保留 `upstream_quota_exhausted` 与原始响应证据，对外 HTTP 402。未知、代理 HTML、截断或矛盾响应仍为 `uncertain`。此分类不解锁、不换号、不重发；已保存的旧 pending 及旧分类不追溯改写。
 - 仅完整读取、符合现有原生错误形状的 400/401/403/413/415/422/429，且没有矛盾的成功/受理标志，才分类为 `rejected`。HTML/代理拦截、部分响应、5xx、连接中断、无效 JSON、关联不符或受理保存失败保留为 `uncertain`；本地组包失败为 `not_sent`。不据此猜测上游接受性或绕过拒绝。
 - 公开失败保持 `recovery_*` 请求级代码，同时保留原错误代码与实际 HTTP 状态的说明；401 的原网关语义仍为502，不冒充客户端 API Key401。宿主不自动换号、冷却账号或重发。重复请求和重启返回同一已保存原因，不再统一丢成无来源的409。
 - 原管理员只读 result 入口可直接返回保存的 `submission_failure` 元数据，状态为 `submission_rejected` / `submission_uncertain` / `submission_not_sent`，`read_only=true`、`continuation_applied=false`；它不是成功模型结果，无工具输出，无 native 历史 GET，不刷新游标或清 pending。

@@ -14,6 +14,10 @@ import (
 // This slice deliberately retains pending. It must not silently turn a
 // classification/provenance fix into permission to retry an original task.
 func TestSubmissionFailureClassification(t *testing.T) {
+	quotaBody, err := os.ReadFile("testdata/submission_token_limit_402.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, protocol := range []string{"chat", "responses", "messages"} {
 		for _, stream := range []bool{false, true} {
 			for _, tc := range []struct {
@@ -23,6 +27,11 @@ func TestSubmissionFailureClassification(t *testing.T) {
 				{"explicit400", `{"error":"invalid_request","message":"fixture detail"}`, "rejected", "upstream_request_rejected", 400, 400},
 				{"explicit401", `{"error":"unauthorized"}`, "rejected", "upstream_session_expired", 401, 502},
 				{"explicit429", `{"error":"rate_limited"}`, "rejected", "upstream_rate_limited", 429, 429},
+				{"nativeMonthlyQuota402", string(quotaBody), "rejected", "upstream_quota_exhausted", 402, 402},
+				{"unknown402", `{"error":"Payment required","code":"unknown"}`, "uncertain", "upstream_http_error", 402, 409},
+				{"quotaWordsOnly402", `{"error":"monthly quota exhausted"}`, "uncertain", "upstream_http_error", 402, 409},
+				{"proxy402", `<html>Payment required</html>`, "uncertain", "upstream_http_error", 402, 409},
+				{"contradictoryQuota402", `{"error":"quota exhausted","code":"token_limit_reached","accepted":true}`, "uncertain", "upstream_http_error", 402, 409},
 				{"ambiguous503", `{"error":"synthetic response lost after possible acceptance"}`, "uncertain", "upstream_http_error", 503, 409},
 				{"invalid200", `not-json`, "uncertain", "upstream_response_invalid", 200, 409},
 				{"wrongAck200", `{"success":true,"conversationId":"another-project","messageId":"other","redirected":false}`, "uncertain", "upstream_project_mismatch", 200, 409},

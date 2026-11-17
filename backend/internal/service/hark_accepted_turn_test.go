@@ -28,6 +28,14 @@ func TestHarkUnacceptedRateLimitStillFailsOver(t *testing.T) {
 	}
 }
 
+func TestHarkQuotaRejectionRetainsAccount(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	body := []byte(`{"error":{"code":"recovery_submission_rejected","message":"upstream_quota_exhausted; pending retained"}}`)
+	for _, status := range []int{http.StatusPaymentRequired, http.StatusConflict, http.StatusBadGateway} {
+		require.False(t, svc.shouldFailoverOpenAIUpstreamResponse(&Account{Platform: "hark"}, status, "", body), "quota classification must not authorize account rotation")
+	}
+}
+
 func TestHarkAcceptedInterruptionDoesNotRotateAccounts(t *testing.T) {
 	service := &OpenAIGatewayService{}
 	account := &Account{Platform: "hark"}
