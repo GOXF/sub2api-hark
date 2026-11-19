@@ -23,11 +23,14 @@ type projectSession struct {
 	AccountID      string    `json:"account_id"`
 	ConversationID string    `json:"conversation_id"`
 	LastUsed       time.Time `json:"last_used"`
-	Ending         bool      `json:"ending,omitempty"`
-	Archived       bool      `json:"archived,omitempty"`
-	Sent           []string  `json:"sent,omitempty"`
-	Systems        []string  `json:"systems,omitempty"`
-	Turns          int       `json:"turns,omitempty"`
+	// PromptVersion marks the outbound envelope that created this Project.
+	// Older envelopes contained the client/API wording Hark refuses.
+	PromptVersion int      `json:"prompt_version,omitempty"`
+	Ending        bool     `json:"ending,omitempty"`
+	Archived      bool     `json:"archived,omitempty"`
+	Sent          []string `json:"sent,omitempty"`
+	Systems       []string `json:"systems,omitempty"`
+	Turns         int      `json:"turns,omitempty"`
 	// Version 2 keeps the old sent/systems reader compatible with rollback,
 	// while the new planner uses the unmodified client-history fingerprints.
 	LabelHistoryVersion int                 `json:"label_history_version,omitempty"`
@@ -38,6 +41,14 @@ type projectSession struct {
 	Recovery            *recoveryDelivery   `json:"recovery_delivery,omitempty"`
 	RecoverySeen        []string            `json:"recovery_seen,omitempty"`
 	Busy                bool                `json:"-"`
+}
+
+// projectPromptVersion must change whenever the outbound envelope stops being
+// safe to continue in an existing Hark Project.
+const projectPromptVersion = 2
+
+func (p *projectSession) needsPromptReset() bool {
+	return p != nil && p.ConversationID != "" && p.PromptVersion != projectPromptVersion && p.PendingTurn == nil
 }
 
 type pendingProjectTurn struct {

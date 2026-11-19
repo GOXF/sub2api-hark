@@ -147,7 +147,7 @@ func testIdentityUpstreamGeneration(t *testing.T, mode string) {
 					if submissions != 1 {
 						t.Fatalf("upstream submissions=%d; want=1 (no gateway identity shortcut)", submissions)
 					}
-					wants := []string{"Keep original ACP context.", "Prior checkpoint A", "read_file", question}
+					wants := []string{"Prior checkpoint A", "read_file", question}
 					if mode != "internals" && mode != "developer" && (mode != "examples" || !mixed) {
 						wants = append(wants, modelLabelNote("", model))
 					} else if strings.Contains(sent["message"], "[模型标识 / Model identity]") {
@@ -157,6 +157,9 @@ func testIdentityUpstreamGeneration(t *testing.T, mode string) {
 						if !strings.Contains(sent["message"], want) {
 							t.Errorf("forwarded context missing %q: %s", want, sent["message"])
 						}
+					}
+					if strings.Contains(sent["message"], "Keep original ACP context.") {
+						t.Errorf("client system prompt leaked to Hark: %s", sent["message"])
 					}
 				})
 			}

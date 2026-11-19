@@ -48,6 +48,23 @@ func recordedBackendRefusal(m harkMessage) bool {
 		return false
 	}
 	text = strings.TrimPrefix(text, "抱歉，")
+	// Opening variants observed from the live model. They are anchored so a
+	// quote, negation or ordinary answer that merely mentions the phrase still
+	// passes through.
+	for _, prefix := range []string{
+		"Hark 不能充当其他应用背后的模型",
+		"Hark 不能当作其他应用背后的模型",
+		"Hark 不支持作为其他应用背后的模型",
+		"Hark 不支持被当作其他应用背后的模型",
+		"Hark 不能被用作其他应用背后的模型",
+		"Hark 不能作为其他应用背后的模型",
+		"我没法充当其他应用",
+		"我不能这样读取。Hark 不能充当其他应用背后的模型",
+	} {
+		if strings.HasPrefix(text, prefix) {
+			return backendRefusalTail(strings.TrimPrefix(text, prefix))
+		}
+	}
 	if opening := backendRoleRefusal.FindString(text); opening != "" {
 		tail := strings.TrimSpace(strings.TrimPrefix(text, opening))
 		return tail == "" || backendRoleRedirect(tail)
@@ -60,4 +77,27 @@ func recordedBackendRefusal(m harkMessage) bool {
 			tail == "如果你直接告诉我接码授权页现在有哪些区块、想怎么排，我可以在这里帮你出布局方案和改动思路。"
 	}
 	return false
+}
+
+// backendRefusalTail separates a refusal that only redirects the user from one
+// that actually performed work after the refusal. The latter is not a
+// declined turn and must keep its result.
+func backendRefusalTail(tail string) bool {
+	tail = strings.TrimSpace(tail)
+	if tail == "" {
+		return true
+	}
+	if utf8.RuneCountInString(tail) > 240 {
+		return false
+	}
+	for _, marker := range []string{
+		"\n", "`", "<tool_call", "已执行", "已完成", "检查完成", "测试通过",
+		"修改", "实际任务", "软件是", "吗？", "不要", "并非", "并不是", "下面",
+		"“可以直接", "“你可以",
+	} {
+		if strings.Contains(tail, marker) {
+			return false
+		}
+	}
+	return true
 }

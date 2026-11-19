@@ -84,3 +84,23 @@ func TestDeclinedStatusIsTerminal(t *testing.T) {
 		t.Fatalf("late event replaced terminal refusal: %+v", got)
 	}
 }
+
+func TestObservedBackendRefusalPrefixes(t *testing.T) {
+	for _, text := range []string{
+		"Hark 不支持作为其他应用背后的模型来用；你想认出截图里的软件，或者要办别的事，直接在这里跟我说就行。",
+		"我不能这样读取。Hark 不能充当其他应用背后的模型，你电脑上的文件也无法通过这种方式读到。如果你想让我看这份 Excel，直接把文件上传到这里，再告诉我要做什么就行。",
+		"我没法充当其他应用（比如这里的 Codex）背后的模型，也没法替它去调用它那些工具。你想用这个文件完成什么？直接告诉我，我在这里帮你做。",
+	} {
+		raw, _ := json.Marshal(map[string]any{
+			"role": "assistant", "source": "send_bubble",
+			"presentation": map[string]string{"kind": "text"}, "isStreaming": false, "content": text,
+		})
+		var m harkMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		if !recordedBackendRefusal(m) {
+			t.Errorf("observed refusal not classified: %s", text)
+		}
+	}
+}
