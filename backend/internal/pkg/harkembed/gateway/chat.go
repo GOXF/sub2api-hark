@@ -52,6 +52,23 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}
 	defer s.releaseProject(p)
 
+	var oldCID, oldAccount string
+	s.projectMu.Lock()
+	if p.needsPromptReset() {
+		oldCID, oldAccount = p.ConversationID, p.AccountID
+		p.ConversationID, p.AccountID = "", ""
+		p.Sent, p.Systems, p.ClientSent, p.ClientSystems = nil, nil, nil, nil
+		p.LabelHistoryVersion, p.PromptVersion, p.Turns = 0, 0, 0
+		res.Reset = true
+	}
+	s.projectMu.Unlock()
+	if oldCID != "" {
+		if cookie := s.cookieFor(oldAccount); cookie != "" {
+			go s.archiveConversation(oldCID, cookie)
+		}
+		s.projectInfo("旧请求格式的会话已改用新的 Project")
+	}
+
 	owner := recoveryOwner(r)
 	s.projectMu.Lock()
 	if p.OwnerID != "" && p.OwnerID != owner {
@@ -104,9 +121,14 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	}
 	text, files := renderTurn(plan.send)
 	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" && !continuing {
-		text = "SYSTEM: " + label.note + "\n\n" + text
+		text = label.note + "\n\n" + text
 	}
-	text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
+	// Hark refuses a prompt that looks like another app's tool protocol. For
+	// attachment questions the file itself is already uploaded, so tools add
+	// no capability and only make the request look like an API backend.
+	if includeToolPrompt(v, files) {
+		text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
+	}
 	if len(files) > maxFilesPerRequest {
 		return &statusInputError{400, "too_many_files", fmt.Sprintf("单轮最多上传 %d 个附件", maxFilesPerRequest)}
 	}
@@ -157,6 +179,7 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 				account, release, attachments = a, rel, atts
 				s.projectMu.Lock()
 				p.AccountID, p.ConversationID = a.ID, cid
+				p.PromptVersion = projectPromptVersion
 				s.projectMu.Unlock()
 				break
 			}
@@ -335,7 +358,7 @@ func (s *Server) nativeProjectPayload(v chatRequest, zone, cid, text string, att
 		}
 	}
 	payload["conversationId"] = cid
-	payload["message"] = projectScopedMessage(cid, text)
+	payload["message"] = projectScopedMessage(text)
 	if _, provided := payload["timezone"]; !provided {
 		payload["timezone"] = zone
 	}

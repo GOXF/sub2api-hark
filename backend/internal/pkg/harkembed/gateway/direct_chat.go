@@ -402,25 +402,38 @@ func declinedNoticeForTurn(messages []harkMessage, expected, requestID string) s
 }
 
 // renderTurn converts the messages being forwarded into Hark's single
-// "message" string and the list of files to attach. One user message is sent
-// verbatim; several messages become ROLE-labelled blocks.
+// "message" string and the list of files to attach. Client system/developer
+// prompts are omitted: Hark treats another app's instructions as an API
+// backend request and refuses. One user message is sent verbatim; several
+// messages become ROLE-labelled blocks.
 func renderTurn(messages []chatMessage) (string, []inputFile) {
 	var files []inputFile
-	for _, m := range messages {
-		files = append(files, m.Files...)
+	lastUser := -1
+	for i := range messages {
+		if messages[i].Role == "user" {
+			lastUser = i
+		}
 	}
-	if len(messages) == 1 && messages[0].Role == "user" {
-		text := messages[0].Content
+	visible := make([]chatMessage, 0, len(messages))
+	for i, m := range messages {
+		if isSystemRole(m.Role) || i != lastUser && isSyntheticClientContext(m) {
+			continue
+		}
+		files = append(files, m.Files...)
+		visible = append(visible, m)
+	}
+	if len(visible) == 1 && visible[0].Role == "user" {
+		text := renderMessageText(visible[0])
 		if strings.TrimSpace(text) == "" && len(files) > 0 {
 			text = "请查看附件。"
 		}
 		return text, files
 	}
 	var blocks []string
-	for _, m := range messages {
+	for _, m := range visible {
 		var lines []string
-		if strings.TrimSpace(m.Content) != "" {
-			lines = append(lines, m.Content)
+		if text := renderMessageText(m); strings.TrimSpace(text) != "" {
+			lines = append(lines, text)
 		}
 		if m.ToolCalls != "" {
 			lines = append(lines, "tool_calls: "+m.ToolCalls)
@@ -436,6 +449,42 @@ func renderTurn(messages []chatMessage) (string, []inputFile) {
 	return strings.Join(blocks, "\n\n"), files
 }
 
+// renderMessageText keeps the attachment's basename instead of the absolute
+// path from the client's computer. Hark sees the uploaded file itself; a
+// local path only makes it answer that it cannot read that computer.
+func renderMessageText(m chatMessage) string {
+	if len(m.Files) == 0 {
+		return m.Content
+	}
+	// The client's attachment header carries the local path; the actual
+	// request may legitimately mention a path of its own, so leave it alone.
+	if i := strings.Index(m.Content, "## My request:"); i >= 0 {
+		return stripLocalPaths(m.Content[:i]) + m.Content[i:]
+	}
+	return stripLocalPaths(m.Content)
+}
+
+// Clients prepend their own policy and environment as user messages. Hark
+// reads those as another application's instructions and refuses; the actual
+// request is the remaining user message.
+func isSyntheticClientContext(m chatMessage) bool {
+	if m.Role != "user" {
+		return false
+	}
+	for _, marker := range []string{
+		"AGENTS.md instructions",
+		"<environment_context>",
+		"<INSTRUCTIONS>",
+		"hindsight_pages",
+		"PONYTAIL MODE ACTIVE",
+	} {
+		if strings.Contains(m.Content, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func transcript(v chatRequest) string {
 	text, _ := renderTurn(v.Messages)
 	return text
@@ -446,7 +495,7 @@ func (s *Server) runDirect(ctx context.Context, cookie, zone string, v chatReque
 	if err != nil {
 		return "", err
 	}
-	payload := map[string]any{"timezone": zone, "conversationId": cid, "message": projectScopedMessage(cid, transcript(v))}
+	payload := map[string]any{"timezone": zone, "conversationId": cid, "message": projectScopedMessage(transcript(v))}
 	reply, err := s.sendProjectPayload(ctx, cookie, cid, payload, interval, turnHooks{})
 	return reply.Text, err
 }

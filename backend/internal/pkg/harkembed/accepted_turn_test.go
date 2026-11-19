@@ -144,13 +144,13 @@ func testHarkEmptyProject(t *testing.T, originalOwner bool) {
 	dataDir := t.TempDir()
 	sum := sha256.Sum256([]byte("embed:sub2api-39\x00empty-session"))
 	key := hex.EncodeToString(sum[:])
-	state := map[string]any{key: map[string]any{"mapping_id": key, "account_id": "sub2api-39", "conversation_id": "unsubmitted-project39", "last_used": "2026-11-15T13:38:21Z"}}
+	state := map[string]any{key: map[string]any{"mapping_id": key, "account_id": "sub2api-39", "conversation_id": "unsubmitted-project39", "last_used": "2026-11-15T13:38:21Z", "prompt_version": 2}}
 	var ownerKey string
 	var owner map[string]any
 	if originalOwner {
 		sum := sha256.Sum256([]byte("embed:sub2api-50\x00empty-session"))
 		ownerKey = hex.EncodeToString(sum[:])
-		owner = map[string]any{"mapping_id": ownerKey, "account_id": "sub2api-50", "conversation_id": "original-account50-project", "last_used": "2026-11-15T13:37:55Z", "turns": 3, "label_history_version": 2, "sent": []string{"legacy-cursor"}, "client_sent": []string{"accepted-cursor"}}
+		owner = map[string]any{"mapping_id": ownerKey, "account_id": "sub2api-50", "conversation_id": "original-account50-project", "last_used": "2026-11-15T13:37:55Z", "prompt_version": 2, "turns": 3, "label_history_version": 2, "sent": []string{"legacy-cursor"}, "client_sent": []string{"accepted-cursor"}}
 		state[ownerKey] = owner
 	}
 	raw, _ := json.Marshal(state)

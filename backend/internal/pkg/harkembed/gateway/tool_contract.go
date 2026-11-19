@@ -6,6 +6,13 @@ func requiresClientTool(v chatRequest) bool {
 	return v.ToolChoiceNamed || v.ToolChoice != "" && v.ToolChoice != "auto" && v.ToolChoice != "none"
 }
 
+// Attachment questions already give Hark the file itself; including the
+// client's optional tool protocol makes the message look like another app's
+// backend request. Required/named tools must still be honored.
+func includeToolPrompt(v chatRequest, files []inputFile) bool {
+	return len(files) == 0 || requiresClientTool(v)
+}
+
 func validateClientToolRequest(v chatRequest, forwardExtra bool) error {
 	if !requiresClientTool(v) {
 		return nil

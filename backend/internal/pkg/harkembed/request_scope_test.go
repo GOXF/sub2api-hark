@@ -262,13 +262,13 @@ func TestRequestScopeOrdinaryOmitsIdentity(t *testing.T) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			text := f.sends[0]["message"]
-			for _, unwanted := range []string{"[模型标识 / Model identity]", "[回复风格 / Response style]", "claude-opus-5-5", "public API configuration"} {
+			for _, unwanted := range []string{"[模型标识 / Model identity]", "[回复风格 / Response style]", "claude-opus-5-5", "public API configuration", "Trusted client policy."} {
 				if strings.Contains(text, unwanted) {
 					t.Errorf("ordinary task received irrelevant identity instructions: %q", unwanted)
 				}
 			}
-			if !strings.Contains(text, "这个要叫注册什么？") || !strings.Contains(text, "Trusted client policy.") {
-				t.Fatal("client task or trusted instructions were removed")
+			if !strings.Contains(text, "这个要叫注册什么？") {
+				t.Fatal("client task was removed")
 			}
 			t.Logf("ORDINARY protocol=%s identity_note=%t task_preserved=true", protocol, strings.Contains(text, "Model identity"))
 		})
@@ -294,7 +294,7 @@ func TestRequestScopeCompactionOmitsExecutionTools(t *testing.T) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			text := f.sends[0]["message"]
-			for _, unwanted := range []string{"CLIENT TOOLS", "<tool_call>", "### read_file", "Model identity", "Response style"} {
+			for _, unwanted := range []string{"TOOLS (run on the user's computer)", "<tool_call>", "### read_file", "Model identity", "Response style"} {
 				if strings.Contains(text, unwanted) {
 					t.Errorf("compaction received execution/identity instructions: %q", unwanted)
 				}
@@ -302,7 +302,7 @@ func TestRequestScopeCompactionOmitsExecutionTools(t *testing.T) {
 			if !strings.Contains(text, scopeCompactionCommand) || !strings.Contains(text, "Prior checkpoint A") {
 				t.Fatal("summary command or trusted task context was removed")
 			}
-			t.Logf("COMPACTION protocol=%s client_tools=%t history_preserved=true", protocol, strings.Contains(text, "CLIENT TOOLS"))
+			t.Logf("COMPACTION protocol=%s tools=%t history_preserved=true", protocol, strings.Contains(text, "TOOLS (run on the user's computer)"))
 		})
 	}
 }
@@ -382,7 +382,7 @@ func TestRequestScopeCompactionForwardExtra(t *testing.T) {
 			t.Errorf("compaction forwarded raw execution field %s", key)
 		}
 	}
-	if strings.Contains(f.sends[0]["message"], "CLIENT TOOLS") {
+	if strings.Contains(f.sends[0]["message"], "TOOLS (run on the user's computer)") {
 		t.Fatal("summary has execution protocol")
 	}
 }

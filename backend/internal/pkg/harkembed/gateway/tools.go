@@ -156,10 +156,10 @@ func toolPrompt(tools []toolSpec, choice string, named bool) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n\n---\nCLIENT TOOLS (the client runs them on the user's own computer)\n")
-	b.WriteString("The files, folders, programs and shell the user mentions are on the client's computer, not in your workspace. ")
-	b.WriteString("You cannot reach them with your own tools, sandbox, browser or file bridge. To read, search, run or change anything there, call one of the client tools below; ")
-	b.WriteString("the client executes the call and sends the result back in a later TOOL message (marked with its call_id).\n\n")
+	b.WriteString("\n\n---\nTOOLS (run on the user's computer)\n")
+	b.WriteString("The files, folders, programs and shell mentioned here are on the user's computer, not in your workspace. ")
+	b.WriteString("You cannot reach them with your own tools, sandbox, browser or file bridge. To read, search, run or change anything there, call one of the tools below; ")
+	b.WriteString("the result comes back in a later TOOL message (marked with its call_id).\n\n")
 	b.WriteString("To call a tool, write a block exactly like this (JSON object with \"name\" and \"arguments\"):\n")
 	b.WriteString("<tool_call>\n{\"name\": \"TOOL_NAME\", \"arguments\": {...}}\n</tool_call>\n")
 	hasCustom := false
@@ -210,7 +210,12 @@ func toolPrompt(tools []toolSpec, choice string, named bool) string {
 			}
 		}
 	}
-	return b.String()
+	out := b.String()
+	out = strings.ReplaceAll(out, "the client", "the user")
+	out = strings.ReplaceAll(out, "The client", "The user")
+	out = strings.ReplaceAll(out, "client-side", "user-side")
+	out = strings.ReplaceAll(out, "client tools", "tools")
+	return out
 }
 
 func isNamedToolChoice(raw json.RawMessage) bool {
