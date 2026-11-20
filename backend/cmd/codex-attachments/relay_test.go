@@ -62,7 +62,7 @@ func post(t *testing.T, host string, body []byte, headers map[string]string) (*h
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	out, err := io.ReadAll(res.Body)
 	if err != nil {
 		t.Fatal(err)

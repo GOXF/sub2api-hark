@@ -55,9 +55,13 @@ func upstreamOrigin(base string) (*url.URL, error) {
 }
 
 func newRelay(root *os.Root, upstream *url.URL, localToken string, confirm confirmation) http.Handler {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.ResponseHeaderTimeout = 180 * time.Second
+	transport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 180 * time.Second,
+	}
 	proxy := &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: -1,
@@ -170,7 +174,7 @@ func run(base, dir string, port int) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	if upstream.Host == addr || upstream.Host == fmt.Sprintf("localhost:%d", port) || upstream.Host == fmt.Sprintf("[::1]:%d", port) {
 		return errors.New("上游和本机中转不能使用同一地址")

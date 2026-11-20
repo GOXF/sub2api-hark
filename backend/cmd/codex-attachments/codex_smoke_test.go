@@ -172,7 +172,7 @@ stream_max_retries = 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	c.Stderr = log
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
@@ -245,7 +245,7 @@ stream_max_retries = 0
 			_ = json.Unmarshal(evt["params"], &params)
 			switch asString(evt["method"]) {
 			case "item/agentMessage/delta":
-				answer.WriteString(params.Delta)
+				_, _ = answer.WriteString(params.Delta)
 			case "turn/completed":
 				if params.Turn.Status != "completed" {
 					t.Fatalf("turn %d %s: %s", i+1, params.Turn.Status, params.Turn.Error)
