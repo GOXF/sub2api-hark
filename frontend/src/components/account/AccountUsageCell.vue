@@ -518,6 +518,9 @@
         <div v-if="harkUsageText" class="text-[10px] text-gray-500 dark:text-gray-400" :title="harkUsageHint">
           {{ harkUsageText }}
         </div>
+        <div v-if="harkResetText" class="text-[10px] text-gray-400">
+          {{ harkResetText }}
+        </div>
       </div>
       <div
         v-else-if="usageInfo?.error"
@@ -930,6 +933,19 @@ const harkUsageText = computed(() => {
 })
 
 const harkUsageHint = computed(() => t('admin.accounts.usageWindow.harkUsageHint'))
+
+const harkResetText = computed(() => {
+  const hark = usageInfo.value?.hark_usage
+  if (!hark) return ''
+  const fmt = (iso?: string | null) => {
+    if (!iso) return ''
+    const d = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  const reset = fmt(hark.pool?.resets_at) || fmt(hark.daily?.resets_at)
+  return reset ? t('admin.accounts.usageWindow.harkPoolReset', { time: reset }) : ''
+})
 
 // CN 供应商子单元格可见性（与 CNProviderQuotaCell / CNProviderBalanceCell 共用
 // credentialsBuilder 的单一实现）：都不可见时显示 `-` 占位符。
