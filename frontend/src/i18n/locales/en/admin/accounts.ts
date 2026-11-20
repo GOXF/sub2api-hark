@@ -1711,9 +1711,11 @@ export default {
         noData: 'No usage data available for this account'
       },
       usageWindow: {
-        harkDaily: 'Day',
-        harkPool: 'Pool',
-        harkUsed: 'Today {daily} · Pool {pool}',
+        harkDaily: 'Daily',
+        harkPool: 'Period',
+        harkRemaining: 'Daily {daily} · Period {pool}',
+        harkUsageHint: 'Bars show remaining quota; 0 means exhausted. Numbers are remaining/limit; the right side is time to reset.',
+        harkPoolReset: 'Period reset {time}',
         statsTitle: '5-Hour Window Usage Statistics',
         statsTitleDaily: 'Daily Usage Statistics',
         geminiProDaily: 'Pro',

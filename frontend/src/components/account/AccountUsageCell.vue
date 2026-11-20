@@ -502,19 +502,24 @@
         <UsageProgressBar
           v-if="usageInfo.hark_usage.daily"
           :label="t('admin.accounts.usageWindow.harkDaily')"
-          :utilization="usageInfo.hark_usage.daily.utilization"
+          :utilization="harkRemainingPercent(usageInfo.hark_usage.daily)"
           :resets-at="usageInfo.hark_usage.daily.resets_at"
           color="indigo"
+          remaining-capacity
         />
         <UsageProgressBar
           v-if="usageInfo.hark_usage.pool"
           :label="t('admin.accounts.usageWindow.harkPool')"
-          :utilization="usageInfo.hark_usage.pool.utilization"
+          :utilization="harkRemainingPercent(usageInfo.hark_usage.pool)"
           :resets-at="usageInfo.hark_usage.pool.resets_at"
           color="emerald"
+          remaining-capacity
         />
-        <div v-if="harkUsageText" class="text-[10px] text-gray-500 dark:text-gray-400" :title="harkUsageText">
+        <div v-if="harkUsageText" class="text-[10px] text-gray-500 dark:text-gray-400" :title="harkUsageHint">
           {{ harkUsageText }}
+        </div>
+        <div v-if="harkResetText" class="text-[10px] text-gray-400">
+          {{ harkResetText }}
         </div>
       </div>
       <div
@@ -912,13 +917,43 @@ const shouldFetchUsage = computed(() => {
   return false
 })
 
+const harkRemainingPercent = (m?: { utilization?: number } | null) =>
+  Math.min(Math.max(100 - (m?.utilization ?? 0), 0), 100)
+
 const harkUsageText = computed(() => {
   const hark = usageInfo.value?.hark_usage
   if (!hark) return ''
-  const meter = (m?: { used: number; limit: number } | null) =>
-    m ? `${formatCompactNumber(m.used)}/${formatCompactNumber(m.limit)}` : '-'
-  const text = t('admin.accounts.usageWindow.harkUsed', { daily: meter(hark.daily), pool: meter(hark.pool) })
+  const remaining = (m?: { used: number; limit: number } | null) =>
+    m ? `${formatCompactNumber(Math.max(m.limit - m.used, 0))} / ${formatCompactNumber(m.limit)}` : '-'
+  const text = t('admin.accounts.usageWindow.harkRemaining', {
+    daily: remaining(hark.daily),
+    pool: remaining(hark.pool),
+  })
   return hark.plan ? `${text} · ${hark.plan}` : text
+})
+
+const harkUsageHint = computed(() => t('admin.accounts.usageWindow.harkUsageHint'))
+
+const harkResetText = computed(() => {
+  const hark = usageInfo.value?.hark_usage
+  if (!hark) return ''
+  const fmt = (iso?: string | null) => {
+    if (!iso) return ''
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d)
+    const get = (type: string) => parts.find((p) => p.type === type)?.value || ''
+    return `${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`
+  }
+  const reset = fmt(hark.pool?.resets_at) || fmt(hark.daily?.resets_at)
+  return reset ? t('admin.accounts.usageWindow.harkPoolReset', { time: reset }) : ''
 })
 
 // CN 供应商子单元格可见性（与 CNProviderQuotaCell / CNProviderBalanceCell 共用

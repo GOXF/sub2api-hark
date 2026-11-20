@@ -38,6 +38,8 @@ func stripLocalPaths(text string) string {
 		base := path.Base(strings.ReplaceAll(trimmed, `\`, "/"))
 		if base == "." || base == "/" || base == "" {
 			out.WriteString("[附件]")
+		} else if strings.HasPrefix(strings.ToLower(base), "codex-") || strings.HasPrefix(strings.ToLower(base), "codex_") {
+			out.WriteString("[附件]")
 		} else {
 			out.WriteString(base)
 		}

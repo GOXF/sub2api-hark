@@ -467,11 +467,11 @@ describe('AccountUsageCell', () => {
     expect(getUsage).toHaveBeenCalledWith(9105)
     const bars = wrapper.findAll('.usage-bar').map(bar => bar.text())
     expect(bars).toEqual([
-      'admin.accounts.usageWindow.harkDaily|25|2026-11-05T00:00:00Z',
-      'admin.accounts.usageWindow.harkPool|33.33|'
+      'admin.accounts.usageWindow.harkDaily|75|2026-11-05T00:00:00Z',
+      'admin.accounts.usageWindow.harkPool|66.67|'
     ])
     expect(wrapper.find('[data-test="cn-quota-cell"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.harkUsed · Pro')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.harkRemaining · Pro')
   })
 
   it('Antigravity 图片用量会聚合新旧 image 模型', async () => {

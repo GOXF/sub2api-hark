@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,7 +27,7 @@ func TestRenderTurnOmitsClientSystemContextAndLocalPaths(t *testing.T) {
 			t.Errorf("outbound text leaked %q: %s", unwanted, text)
 		}
 	}
-	for _, want := range []string{"能读取文件吗？", "项目规范对比模板.xlsx"} {
+	for _, want := range []string{"能读取文件吗？"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("outbound text missing %q: %s", want, text)
 		}
@@ -59,13 +60,22 @@ func TestToolPromptOmitsClientWording(t *testing.T) {
 }
 
 func TestAttachmentRequestsSkipOptionalTools(t *testing.T) {
-	if includeToolPrompt(chatRequest{}, []inputFile{{Name: "file.xlsx"}}) {
+	if includeToolPrompt(chatRequest{}, []inputFile{{Name: "file.xlsx"}}, false) {
 		t.Fatal("optional tools added to an attachment question")
 	}
-	if !includeToolPrompt(chatRequest{}, nil) {
+	if !includeToolPrompt(chatRequest{}, nil, false) {
 		t.Fatal("tools missing from an ordinary request")
 	}
-	if !includeToolPrompt(chatRequest{ToolChoice: "required"}, []inputFile{{Name: "file.xlsx"}}) {
+	if includeToolPrompt(chatRequest{}, nil, true) {
+		t.Fatal("optional tools added to a file-wrapper request without an upload")
+	}
+	if !includeToolPrompt(chatRequest{ToolChoice: "required"}, nil, true) {
+		t.Fatal("required tools dropped from a file-wrapper request")
+	}
+	if !includeToolPrompt(chatRequest{ToolChoice: "read_file", ToolChoiceNamed: true}, nil, true) {
+		t.Fatal("named tools dropped from a file-wrapper request")
+	}
+	if !includeToolPrompt(chatRequest{ToolChoice: "required"}, []inputFile{{Name: "file.xlsx"}}, false) {
 		t.Fatal("required tools dropped from an attachment request")
 	}
 }
@@ -74,6 +84,7 @@ func TestStripLocalPathsKeepsBasename(t *testing.T) {
 	for in, want := range map[string]string{
 		`C:/Users/XIA/DeskBox/项目规范对比模板.xlsx`:                    "项目规范对比模板.xlsx",
 		`C:\Users\XIA\AppData\Local\Temp\shot.png`:              "shot.png",
+		`C:\Users\XIA\AppData\Local\Temp\codex-clipboard-1.png`: "[附件]",
 		`/home/user/work/report.csv`:                            "report.csv",
 		`see C:/Users/XIA/file.txt.`:                            "see file.txt.",
 		`https://example.com/C:/Users/XIA/file.txt stays whole`: "https://example.com/C:/Users/XIA/file.txt stays whole",
@@ -81,6 +92,13 @@ func TestStripLocalPathsKeepsBasename(t *testing.T) {
 		if got := stripLocalPaths(in); got != want {
 			t.Errorf("stripLocalPaths(%q)=%q want=%q", in, got, want)
 		}
+	}
+}
+
+func TestExtractClientRequestDropsCodexEnvironment(t *testing.T) {
+	in := "# Files mentioned by the user:\n\n## codex-clipboard-1.png: C:/Users/XIA/AppData/Local/Temp/codex-clipboard-1.png\n\n## My request:\n这是什么软件的界面\n\nUSER:\n<environment_context>\nCodex desktop\n</environment_context>\n<image name=[Image #1] path=\"C:\\Users\\XIA\\codex-clipboard-1.png\">\n</image>"
+	if got := extractClientRequest(in); got != "这是什么软件的界面" {
+		t.Fatalf("extractClientRequest=%q", got)
 	}
 }
 
@@ -106,6 +124,50 @@ func TestRenderMessageKeepsPathsInsideUserRequest(t *testing.T) {
 	text := renderMessageText(m)
 	if strings.Contains(text, "C:/Users/XIA") || !strings.Contains(text, "C:/work/app/main.go") {
 		t.Fatalf("wrong path stripped: %s", text)
+	}
+}
+
+func TestRenderMessageExtractsFileWrapperWithoutUpload(t *testing.T) {
+	m := chatMessage{
+		Role: "user",
+		Content: "# Files mentioned by the user:\n\n" +
+			"## 代发记录.xls: C:/Users/XIA/Desktop/代发记录.xls\n\n" +
+			"## My request:\n能读取到吗？",
+	}
+	if text := renderMessageText(m); text != "文件路径: C:/Users/XIA/Desktop/代发记录.xls\n\n能读取到吗？" {
+		t.Fatalf("wrapper not extracted: %q", text)
+	}
+
+	m.Content = "## My request:\n修复 C:/work/app/main.go 的报错"
+	if text := renderMessageText(m); text != "修复 C:/work/app/main.go 的报错" {
+		t.Fatalf("path inside the request was changed: %q", text)
+	}
+
+	m.Content = "# Files mentioned by the user:\n\n## a.xls: C:/a.xls\n## b.xls: C:/b.xls\n\n## My request:\n看这两个"
+	if text := renderMessageText(m); text != "文件路径: C:/a.xls\n文件路径: C:/b.xls\n\n看这两个" {
+		t.Fatalf("multiple paths not preserved: %q", text)
+	}
+}
+
+func TestFileWrapperTurnKeepsPathAndSkipsTools(t *testing.T) {
+	msg := chatMessage{
+		Role: "user",
+		Content: "# Files mentioned by the user:\n\n" +
+			"## 代发记录.xls: C:/Users/XIA/Desktop/代发记录.xls\n\n" +
+			"## My request:\n能读取到吗？",
+	}
+	text, files := renderTurn([]chatMessage{msg})
+	if len(files) != 0 {
+		t.Fatalf("files=%d", len(files))
+	}
+	if !strings.Contains(text, "文件路径: C:/Users/XIA/Desktop/代发记录.xls") || !strings.Contains(text, "能读取到吗？") {
+		t.Fatalf("local path or request dropped: %s", text)
+	}
+	if strings.Contains(text, "# Files mentioned") {
+		t.Fatalf("wrapper leaked: %s", text)
+	}
+	if includeToolPrompt(chatRequest{}, files, hasAttachmentWrapperTurn([]chatMessage{msg})) {
+		t.Fatal("optional tools added to a file-wrapper request without an upload")
 	}
 }
 
@@ -187,12 +249,44 @@ func TestAttachmentTurnSanitizesOutboundMessage(t *testing.T) {
 			t.Errorf("outbound message leaked %q: %s", unwanted, message)
 		}
 	}
-	for _, want := range []string{"能读取文件吗？", "项目规范对比模板.xlsx"} {
+	for _, want := range []string{"能读取文件吗？"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("outbound message missing %q: %s", want, message)
 		}
 	}
 	if !strings.Contains(string(sent["attachments"]), "att-1") {
 		t.Errorf("attachment not forwarded: %s", sent["attachments"])
+	}
+}
+
+func TestFileWrapperTurnWithoutUploadFailsBeforeUpstream(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	server, err := NewEmbedded(t.TempDir(), Options{Upstream: upstream.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stream := range []bool{false, true} {
+		body := map[string]any{
+			"model": "hark", "stream": stream,
+			"input": "# Files mentioned by the user:\n\n## fixture.xls: C:/workspace/fixture.xls\n\n## My request:\n能读取到吗？",
+		}
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(raw)))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(WithEmbeddedAccount(context.Background(), SourceAccount{ID: "fixture", Cookie: "fixture-cookie"}))
+		rec := httptest.NewRecorder()
+		server.EmbeddedHandler().ServeHTTP(rec, req)
+		text := rec.Body.String()
+		if rec.Code != http.StatusBadRequest || !strings.Contains(text, "missing_file_content") ||
+			!strings.Contains(text, "未收到附件内容") || strings.Contains(strings.ToLower(text), "hark") ||
+			strings.Contains(text, "C:/workspace") || upstreamCalls.Load() != 0 {
+			t.Errorf("stream=%t HTTP %d, upstream calls=%d, response=%q", stream, rec.Code, upstreamCalls.Load(), text)
+		}
 	}
 }

@@ -514,7 +514,9 @@ export default {
       usageWindow: {
         harkDaily: '今日',
         harkPool: '本期',
-        harkUsed: '今日 {daily} · 本期 {pool}',
+        harkRemaining: '今日 {daily} · 本期 {pool}',
+        harkUsageHint: '进度条和数字都表示剩余额度；0 表示已用完。数字为剩余/上限，右侧为距重置时间。',
+        harkPoolReset: '本期 {time} 重置',
         statsTitle: '5小时窗口用量统计',
         statsTitleDaily: '每日用量统计',
         geminiProDaily: 'Pro',

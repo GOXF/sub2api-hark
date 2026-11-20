@@ -8,9 +8,11 @@ func requiresClientTool(v chatRequest) bool {
 
 // Attachment questions already give Hark the file itself; including the
 // client's optional tool protocol makes the message look like another app's
-// backend request. Required/named tools must still be honored.
-func includeToolPrompt(v chatRequest, files []inputFile) bool {
-	return len(files) == 0 || requiresClientTool(v)
+// backend request. Required/named tools must still be honored. A file wrapper
+// without an upload has no bytes for Hark to read, and Hark refuses every
+// externally defined tool protocol, so its optional tools are skipped too.
+func includeToolPrompt(v chatRequest, files []inputFile, wrapper bool) bool {
+	return requiresClientTool(v) || len(files) == 0 && !wrapper
 }
 
 func validateClientToolRequest(v chatRequest, forwardExtra bool) error {

@@ -74,6 +74,22 @@ hark2api 的会话与 Project 状态存在 `$HARK_DATA_DIR`，默认 `$DATA_DIR/
   需要仓库机密 `HARK2API_TOKEN`（能读 GOXF/hark2api 的 PAT）。
 - `.github/workflows/hark-image.yml`：镜像 `ghcr.io/goxf/sub2api-hark:latest`。
 - 手动同步 hark2api：`tools/sync-hark2api.sh <hark2api 目录>`。同步从上游已提交的 `HEAD:gateway` 导出，再应用 `tools/harkembed-transport.patch` 保留本项目浏览器 TLS 适配；补丁冲突时停止，保留现有嵌入代码。
+## 发送附件
+
+`POST /v1/responses` 中的用户消息可携带 `input_file`：`filename` 填文件名，`file_data` 填文件字节的 Base64。网关按原字节上传，不按扩展名限制；实际可解析的格式由上游决定。不会尝试打开请求文本中的本机路径或执行模型生成的命令。
+
+只有本机路径时会返回 `missing_file_content`，明确要求使用真实上传入口；上传方明确拒绝某种格式时返回 HTTP 415 / `unsupported_file_type`，例如「不支持 .fixture 格式的文件」。额度和网络错误不冒充格式错误。
+
+本地测试可以用 `tools/send_attachment.py`。从自己的安全配置设置 `SUB2API_API_KEY`，把下例的地址、模型和文件换成你的配置：
+
+```powershell
+python tools/send_attachment.py --url "https://YOUR_SUB2API/v1/responses" --model "YOUR_MODEL" --prompt "读取第一个单元格" "C:/path/test.xls"
+```
+
+脚本只读取命令行选定的文件，并另起一次对话请求；它不会改变 Codex 原生拖拽或客户端配置。
+
+如果需要在同一个 Codex 会话里处理「文件和文件夹」或拖入的本机文件，可以选择使用 [Windows 本机附件中转](backend/cmd/codex-attachments/README.md)。只有用户在本机确认后才发送指定目录内的文件内容，不需要从模型返回的文字执行任何命令。
+
 # 独立处理状态（opt-in）
 
 流式请求可携带 `"hark_status": true`（或直连网关时 `X-Hark-Status: true`）。未启用时不额外订阅上游状态，也不改变既有 SSE；该字段不会发给 Hark 的消息提交接口。

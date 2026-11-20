@@ -123,10 +123,11 @@ func (s *Server) runTurn(ctx context.Context, r *http.Request, v chatRequest, re
 	if label, ok := r.Context().Value(modelLabelKey{}).(modelLabelContext); ok && label.note != "" && !continuing {
 		text = label.note + "\n\n" + text
 	}
-	// Hark refuses a prompt that looks like another app's tool protocol. For
-	// attachment questions the file itself is already uploaded, so tools add
-	// no capability and only make the request look like an API backend.
-	if includeToolPrompt(v, files) {
+	// Hark refuses a prompt that looks like another app's tool protocol.
+	// Uploaded attachments are already on Hark, and a file wrapper without
+	// bytes has nothing tools can read, so optional tools only make the
+	// request look like an API backend.
+	if includeToolPrompt(v, files, hasAttachmentWrapperTurn(plan.send)) {
 		text += toolPrompt(v.Tools, v.ToolChoice, v.ToolChoiceNamed)
 	}
 	if len(files) > maxFilesPerRequest {
@@ -443,6 +444,15 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 		return
 	}
 	compact := isCheckpointCompaction(v)
+	if !compact && len(v.Messages) > 0 {
+		last := v.Messages[len(v.Messages)-1]
+		if last.Role == "user" && len(last.Files) == 0 &&
+			strings.HasPrefix(strings.TrimSpace(last.Content), "# Files mentioned by the user:") &&
+			len(wrapperFilePaths(last.Content)) > 0 {
+			s.turnFailed(w, r, r.Context(), inputError("missing_file_content", "未收到附件内容：本次请求只有文件路径，请通过文件上传入口重新发送。"), format)
+			return
+		}
+	}
 	w.Header().Set("X-Hark-Context-Isolation", "instruction-only")
 	toolsNote := ""
 	if compact && !requiresClientTool(v) {
