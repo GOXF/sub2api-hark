@@ -88,6 +88,8 @@ python tools/send_attachment.py --url "https://YOUR_SUB2API/v1/responses" --mode
 
 脚本只读取命令行选定的文件，并另起一次对话请求；它不会改变 Codex 原生拖拽或客户端配置。
 
+如果需要在同一个 Codex 会话里处理「文件和文件夹」或拖入的本机文件，可以选择使用 [Windows 本机附件中转](backend/cmd/codex-attachments/README.md)。只有用户在本机确认后才发送指定目录内的文件内容，不需要从模型返回的文字执行任何命令。
+
 # 独立处理状态（opt-in）
 
 流式请求可携带 `"hark_status": true`（或直连网关时 `X-Hark-Status: true`）。未启用时不额外订阅上游状态，也不改变既有 SSE；该字段不会发给 Hark 的消息提交接口。
