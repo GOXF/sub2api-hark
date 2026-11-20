@@ -59,13 +59,22 @@ func TestToolPromptOmitsClientWording(t *testing.T) {
 }
 
 func TestAttachmentRequestsSkipOptionalTools(t *testing.T) {
-	if includeToolPrompt(chatRequest{}, []inputFile{{Name: "file.xlsx"}}) {
+	if includeToolPrompt(chatRequest{}, []inputFile{{Name: "file.xlsx"}}, false) {
 		t.Fatal("optional tools added to an attachment question")
 	}
-	if !includeToolPrompt(chatRequest{}, nil) {
+	if !includeToolPrompt(chatRequest{}, nil, false) {
 		t.Fatal("tools missing from an ordinary request")
 	}
-	if !includeToolPrompt(chatRequest{ToolChoice: "required"}, []inputFile{{Name: "file.xlsx"}}) {
+	if includeToolPrompt(chatRequest{}, nil, true) {
+		t.Fatal("optional tools added to a file-wrapper request without an upload")
+	}
+	if !includeToolPrompt(chatRequest{ToolChoice: "required"}, nil, true) {
+		t.Fatal("required tools dropped from a file-wrapper request")
+	}
+	if !includeToolPrompt(chatRequest{ToolChoice: "read_file", ToolChoiceNamed: true}, nil, true) {
+		t.Fatal("named tools dropped from a file-wrapper request")
+	}
+	if !includeToolPrompt(chatRequest{ToolChoice: "required"}, []inputFile{{Name: "file.xlsx"}}, false) {
 		t.Fatal("required tools dropped from an attachment request")
 	}
 }
@@ -114,6 +123,50 @@ func TestRenderMessageKeepsPathsInsideUserRequest(t *testing.T) {
 	text := renderMessageText(m)
 	if strings.Contains(text, "C:/Users/XIA") || !strings.Contains(text, "C:/work/app/main.go") {
 		t.Fatalf("wrong path stripped: %s", text)
+	}
+}
+
+func TestRenderMessageExtractsFileWrapperWithoutUpload(t *testing.T) {
+	m := chatMessage{
+		Role: "user",
+		Content: "# Files mentioned by the user:\n\n" +
+			"## 代发记录.xls: C:/Users/XIA/Desktop/代发记录.xls\n\n" +
+			"## My request:\n能读取到吗？",
+	}
+	if text := renderMessageText(m); text != "文件路径: C:/Users/XIA/Desktop/代发记录.xls\n\n能读取到吗？" {
+		t.Fatalf("wrapper not extracted: %q", text)
+	}
+
+	m.Content = "## My request:\n修复 C:/work/app/main.go 的报错"
+	if text := renderMessageText(m); text != "修复 C:/work/app/main.go 的报错" {
+		t.Fatalf("path inside the request was changed: %q", text)
+	}
+
+	m.Content = "# Files mentioned by the user:\n\n## a.xls: C:/a.xls\n## b.xls: C:/b.xls\n\n## My request:\n看这两个"
+	if text := renderMessageText(m); text != "文件路径: C:/a.xls\n文件路径: C:/b.xls\n\n看这两个" {
+		t.Fatalf("multiple paths not preserved: %q", text)
+	}
+}
+
+func TestFileWrapperTurnKeepsPathAndSkipsTools(t *testing.T) {
+	msg := chatMessage{
+		Role: "user",
+		Content: "# Files mentioned by the user:\n\n" +
+			"## 代发记录.xls: C:/Users/XIA/Desktop/代发记录.xls\n\n" +
+			"## My request:\n能读取到吗？",
+	}
+	text, files := renderTurn([]chatMessage{msg})
+	if len(files) != 0 {
+		t.Fatalf("files=%d", len(files))
+	}
+	if !strings.Contains(text, "文件路径: C:/Users/XIA/Desktop/代发记录.xls") || !strings.Contains(text, "能读取到吗？") {
+		t.Fatalf("local path or request dropped: %s", text)
+	}
+	if strings.Contains(text, "# Files mentioned") {
+		t.Fatalf("wrapper leaked: %s", text)
+	}
+	if includeToolPrompt(chatRequest{}, files, hasAttachmentWrapperTurn([]chatMessage{msg})) {
+		t.Fatal("optional tools added to a file-wrapper request without an upload")
 	}
 }
 
@@ -202,5 +255,72 @@ func TestAttachmentTurnSanitizesOutboundMessage(t *testing.T) {
 	}
 	if !strings.Contains(string(sent["attachments"]), "att-1") {
 		t.Errorf("attachment not forwarded: %s", sent["attachments"])
+	}
+}
+
+func TestFileWrapperTurnWithoutUploadSendsPathAndRequest(t *testing.T) {
+	var sent map[string]json.RawMessage
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/conversations":
+			_ = json.NewEncoder(w).Encode(map[string]string{"conversationId": "xls-project"})
+		case "/api/messages/send":
+			_ = json.NewDecoder(r.Body).Decode(&sent)
+			var userID string
+			_ = json.Unmarshal(sent["idempotencyKey"], &userID)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "xls-project", "messageId": userID, "redirected": false})
+		case "/api/messages/history":
+			var userID, responseID string
+			_ = json.Unmarshal(sent["idempotencyKey"], &userID)
+			_ = json.Unmarshal(sent["responseMessageId"], &responseID)
+			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{
+				"id": responseID, "role": "assistant", "triggeredByMessageId": userID,
+				"jobStatus": "completed", "isStreaming": false, "content": "ok",
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	server, err := NewEmbedded(t.TempDir(), Options{Upstream: upstream.URL, PollInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{
+		"model":  "hark",
+		"stream": false,
+		"messages": []any{
+			map[string]string{"role": "system", "content": "You are Codex, a coding agent."},
+			map[string]string{"role": "user", "content": "# AGENTS.md instructions\n<INSTRUCTIONS>Use Codex.</INSTRUCTIONS>"},
+			map[string]string{"role": "user", "content": "# Files mentioned by the user:\n\n## 代发记录.xls: C:/Users/XIA/Desktop/代发记录.xls\n\n## My request:\n能读取到吗？"},
+		},
+		"tools": []any{map[string]any{"type": "function", "function": map[string]any{
+			"name": "exec_command", "description": "The client runs a command on the user's computer.", "parameters": map[string]string{"type": "object"},
+		}}},
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "http://hark.internal/v1/chat/completions", strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer fixture-cookie")
+	req = req.WithContext(WithEmbeddedAccount(context.Background(), SourceAccount{ID: "fixture", Cookie: "fixture-cookie"}))
+	rec := httptest.NewRecorder()
+	server.EmbeddedHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var message string
+	_ = json.Unmarshal(sent["message"], &message)
+	if !strings.Contains(message, "文件路径: C:/Users/XIA/Desktop/代发记录.xls") || !strings.Contains(message, "能读取到吗？") {
+		t.Fatalf("local path or request missing: %q", message)
+	}
+	if len(message) > 1000 {
+		t.Fatalf("outbound message still carries a tool block: %d bytes", len(message))
+	}
+	for _, unwanted := range []string{"# Files mentioned", "TOOLS", "<tool_call>", "### exec_command", "client", "user's computer"} {
+		if strings.Contains(message, unwanted) {
+			t.Errorf("outbound message leaked %q: %s", unwanted, message)
+		}
 	}
 }

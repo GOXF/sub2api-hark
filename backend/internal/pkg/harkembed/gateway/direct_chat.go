@@ -450,14 +450,66 @@ func renderTurn(messages []chatMessage) (string, []inputFile) {
 	return strings.Join(blocks, "\n\n"), files
 }
 
-// renderMessageText keeps the attachment's basename instead of the absolute
-// path from the client's computer. Hark sees the uploaded file itself; a
-// local path only makes it answer that it cannot read that computer.
+// renderMessageText drops the client's file-wrapper header and environment
+// blocks. Uploaded files already reached Hark, so their local paths are
+// removed. Without an upload the path is kept as a plain 文件路径 line; Hark
+// cannot read it, but it can answer honestly instead of refusing the wrapper
+// as another app's backend request.
 func renderMessageText(m chatMessage) string {
-	if len(m.Files) == 0 {
+	if len(m.Files) == 0 && !isAttachmentWrapper(m.Content) {
 		return m.Content
 	}
-	return extractClientRequest(m.Content)
+	text := extractClientRequest(m.Content)
+	if len(m.Files) == 0 {
+		if paths := wrapperFilePaths(m.Content); len(paths) > 0 {
+			lines := make([]string, len(paths))
+			for i, path := range paths {
+				lines[i] = "文件路径: " + path
+			}
+			text = strings.Join(lines, "\n") + "\n\n" + text
+		}
+	}
+	return text
+}
+
+// Clients wrap file turns in a "Files mentioned by the user" header even when
+// the file did not reach us as an upload. The header and local path still make
+// Hark refuse the turn as another app's backend request.
+func isAttachmentWrapper(text string) bool {
+	return strings.Contains(text, "# Files mentioned by the user") || strings.Contains(text, "## My request:")
+}
+
+// hasAttachmentWrapperTurn reports whether the current user message is a
+// client file wrapper that may have arrived without uploaded file bytes.
+func hasAttachmentWrapperTurn(messages []chatMessage) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return isAttachmentWrapper(messages[i].Content)
+		}
+	}
+	return false
+}
+
+// wrapperFilePaths returns the local paths listed before the request. Codex
+// sends these without the file bytes when it cannot upload them; the path is
+// the only way to identify which file the user means.
+func wrapperFilePaths(text string) []string {
+	if i := strings.LastIndex(text, "## My request:"); i >= 0 {
+		text = text[:i]
+	}
+	var paths []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if !strings.HasPrefix(line, "## ") {
+			continue
+		}
+		name, path, ok := strings.Cut(strings.TrimPrefix(line, "## "), ":")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(path) == "" {
+			continue
+		}
+		paths = append(paths, strings.TrimSpace(path))
+	}
+	return paths
 }
 
 var environmentContext = regexp.MustCompile(`(?s)<environment_context>.*?</environment_context>`)
