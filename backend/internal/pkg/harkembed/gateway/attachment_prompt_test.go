@@ -26,7 +26,7 @@ func TestRenderTurnOmitsClientSystemContextAndLocalPaths(t *testing.T) {
 			t.Errorf("outbound text leaked %q: %s", unwanted, text)
 		}
 	}
-	for _, want := range []string{"能读取文件吗？", "项目规范对比模板.xlsx"} {
+	for _, want := range []string{"能读取文件吗？"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("outbound text missing %q: %s", want, text)
 		}
@@ -74,6 +74,7 @@ func TestStripLocalPathsKeepsBasename(t *testing.T) {
 	for in, want := range map[string]string{
 		`C:/Users/XIA/DeskBox/项目规范对比模板.xlsx`:                    "项目规范对比模板.xlsx",
 		`C:\Users\XIA\AppData\Local\Temp\shot.png`:              "shot.png",
+		`C:\Users\XIA\AppData\Local\Temp\codex-clipboard-1.png`: "[附件]",
 		`/home/user/work/report.csv`:                            "report.csv",
 		`see C:/Users/XIA/file.txt.`:                            "see file.txt.",
 		`https://example.com/C:/Users/XIA/file.txt stays whole`: "https://example.com/C:/Users/XIA/file.txt stays whole",
@@ -81,6 +82,13 @@ func TestStripLocalPathsKeepsBasename(t *testing.T) {
 		if got := stripLocalPaths(in); got != want {
 			t.Errorf("stripLocalPaths(%q)=%q want=%q", in, got, want)
 		}
+	}
+}
+
+func TestExtractClientRequestDropsCodexEnvironment(t *testing.T) {
+	in := "# Files mentioned by the user:\n\n## codex-clipboard-1.png: C:/Users/XIA/AppData/Local/Temp/codex-clipboard-1.png\n\n## My request:\n这是什么软件的界面\n\nUSER:\n<environment_context>\nCodex desktop\n</environment_context>\n<image name=[Image #1] path=\"C:\\Users\\XIA\\codex-clipboard-1.png\">\n</image>"
+	if got := extractClientRequest(in); got != "这是什么软件的界面" {
+		t.Fatalf("extractClientRequest=%q", got)
 	}
 }
 
@@ -187,7 +195,7 @@ func TestAttachmentTurnSanitizesOutboundMessage(t *testing.T) {
 			t.Errorf("outbound message leaked %q: %s", unwanted, message)
 		}
 	}
-	for _, want := range []string{"能读取文件吗？", "项目规范对比模板.xlsx"} {
+	for _, want := range []string{"能读取文件吗？"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("outbound message missing %q: %s", want, message)
 		}

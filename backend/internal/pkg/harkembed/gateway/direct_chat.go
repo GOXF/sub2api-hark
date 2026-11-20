@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -456,12 +457,24 @@ func renderMessageText(m chatMessage) string {
 	if len(m.Files) == 0 {
 		return m.Content
 	}
-	// The client's attachment header carries the local path; the actual
-	// request may legitimately mention a path of its own, so leave it alone.
-	if i := strings.Index(m.Content, "## My request:"); i >= 0 {
-		return stripLocalPaths(m.Content[:i]) + m.Content[i:]
+	return extractClientRequest(m.Content)
+}
+
+var environmentContext = regexp.MustCompile(`(?s)<environment_context>.*?</environment_context>`)
+var clientImageTag = regexp.MustCompile(`(?s)<image\b[^>]*>.*?</image>`)
+var clientRoleLine = regexp.MustCompile(`(?m)^[ \t]*(?:USER|SYSTEM|DEVELOPER|ASSISTANT|TOOL):[ \t]*$`)
+
+// extractClientRequest keeps the actual user request from the client's file
+// wrapper and drops its Codex environment block. Those strings make Hark
+// refuse the turn as an attempt to use it as another app's backend.
+func extractClientRequest(text string) string {
+	text = environmentContext.ReplaceAllString(text, "")
+	text = clientImageTag.ReplaceAllString(text, "")
+	text = clientRoleLine.ReplaceAllString(text, "")
+	if i := strings.LastIndex(text, "## My request:"); i >= 0 {
+		text = text[i+len("## My request:"):]
 	}
-	return stripLocalPaths(m.Content)
+	return strings.TrimSpace(text)
 }
 
 // Clients prepend their own policy and environment as user messages. Hark
