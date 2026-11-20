@@ -94,6 +94,11 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 		if readErr != nil {
 			phase, transportError = "read_response", readErr.Error()
 		}
+		if readErr == nil && strings.HasPrefix(path, "/api/files/") &&
+			(strings.HasSuffix(path, "/presign") || strings.HasSuffix(path, "/finalize")) &&
+			attachmentFormatRejected(resp.StatusCode, body) {
+			return errUnsupportedFileType
+		}
 		var rejection struct {
 			Error string `json:"error"`
 		}

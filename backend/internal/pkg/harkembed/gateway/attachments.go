@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,57 @@ import (
 const maxFilesPerRequest = 16
 
 var errTooLarge = errors.New("attachment too large")
+var errUnsupportedFileType = errors.New("unsupported attachment format")
+
+// Format support belongs to the upstream, not to a local filename allowlist.
+func attachmentFormatRejected(status int, body []byte) bool {
+	if status == http.StatusUnsupportedMediaType {
+		return true
+	}
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	type rejection struct {
+		Code    string
+		Message string
+		Detail  string
+	}
+	var top struct {
+		rejection
+		Error json.RawMessage
+	}
+	_ = json.Unmarshal(body, &top)
+	var message string
+	var nested rejection
+	_ = json.Unmarshal(top.Error, &message)
+	_ = json.Unmarshal(top.Error, &nested)
+	for _, reason := range []string{top.Code, top.Message, top.Detail, nested.Code, nested.Message, nested.Detail, message, string(body)} {
+		reason = strings.ToLower(strings.TrimSpace(reason))
+		switch reason {
+		case "unsupported_file_type", "unsupported_file_format", "unsupported_media_type", "unsupported_mime_type", "unsupported_file_extension", "unsupported_attachment_type", "file_type_not_supported":
+			return true
+		}
+		for _, prefix := range []string{"unsupported file type", "unsupported file format", "unsupported media type", "unsupported mime type", "unsupported file extension", "unsupported attachment type", "file type not supported"} {
+			if reason == prefix || strings.HasPrefix(reason, prefix+":") || strings.HasPrefix(reason, prefix+" ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func attachmentUploadError(f inputFile, err error) error {
+	if !errors.Is(err, errUnsupportedFileType) {
+		return err
+	}
+	message := "不支持此附件格式"
+	ext := strings.ToLower(filepath.Ext(f.Name))
+	if len(ext) > 1 && len(ext) <= 21 && !strings.Contains(ext, "hark") &&
+		strings.IndexFunc(ext[1:], func(r rune) bool { return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9') }) < 0 {
+		message = "不支持 " + ext + " 格式的文件"
+	}
+	return &statusInputError{http.StatusUnsupportedMediaType, "unsupported_file_type", message}
+}
 
 // harkAttachment is the attachment object Hark expects in /api/messages/send,
 // following jyao0708/hark2api and ozuijoy/hark2api-node (presign → PUT → finalize).
@@ -290,7 +342,7 @@ func (s *Server) uploadFile(ctx context.Context, cookie, cid string, f inputFile
 	}
 	if err := s.harkJSON(ctx, http.MethodPost, "/api/files/upload/"+url.PathEscape(cid)+"/presign", cookie,
 		map[string]any{"filename": f.Name, "content_type": f.MediaType, "size": len(f.Data)}, &presigned); err != nil {
-		return harkAttachment{}, err
+		return harkAttachment{}, attachmentUploadError(f, err)
 	}
 	if !strings.HasPrefix(presigned.UploadURL, "http://") && !strings.HasPrefix(presigned.UploadURL, "https://") {
 		return harkAttachment{}, &upstreamError{502, "upstream_upload_invalid", "Hark 未返回有效的附件上传地址"}
@@ -318,6 +370,9 @@ func (s *Server) uploadFile(ctx context.Context, cookie, cid string, f inputFile
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 65536))
 	resp.Body.Close()
+	if resp.StatusCode == http.StatusUnsupportedMediaType {
+		return harkAttachment{}, attachmentUploadError(f, errUnsupportedFileType)
+	}
 	if resp.StatusCode >= 400 {
 		return harkAttachment{}, &upstreamError{502, "upstream_upload_failed", fmt.Sprintf("附件上传到 Hark 存储失败：HTTP %d", resp.StatusCode)}
 	}
@@ -331,7 +386,7 @@ func (s *Server) uploadFile(ctx context.Context, cookie, cid string, f inputFile
 	}
 	if err := s.harkJSON(ctx, http.MethodPost, "/api/files/"+url.PathEscape(cid)+"/"+url.PathEscape(presigned.AttachmentID)+"/finalize", cookie,
 		map[string]any{"s3_key": presigned.S3Key, "path": presigned.Path}, &finalized); err != nil {
-		return harkAttachment{}, err
+		return harkAttachment{}, attachmentUploadError(f, err)
 	}
 	a := harkAttachment{AttachmentID: presigned.AttachmentID, Name: f.Name, MediaType: f.MediaType, Size: int64(len(f.Data)), Path: presigned.Path, S3Key: presigned.S3Key, Kind: "file"}
 	if finalized.AttachmentID != "" {

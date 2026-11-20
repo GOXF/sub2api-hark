@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -258,69 +259,34 @@ func TestAttachmentTurnSanitizesOutboundMessage(t *testing.T) {
 	}
 }
 
-func TestFileWrapperTurnWithoutUploadSendsPathAndRequest(t *testing.T) {
-	var sent map[string]json.RawMessage
+func TestFileWrapperTurnWithoutUploadFailsBeforeUpstream(t *testing.T) {
+	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/conversations":
-			_ = json.NewEncoder(w).Encode(map[string]string{"conversationId": "xls-project"})
-		case "/api/messages/send":
-			_ = json.NewDecoder(r.Body).Decode(&sent)
-			var userID string
-			_ = json.Unmarshal(sent["idempotencyKey"], &userID)
-			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "xls-project", "messageId": userID, "redirected": false})
-		case "/api/messages/history":
-			var userID, responseID string
-			_ = json.Unmarshal(sent["idempotencyKey"], &userID)
-			_ = json.Unmarshal(sent["responseMessageId"], &responseID)
-			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{
-				"id": responseID, "role": "assistant", "triggeredByMessageId": userID,
-				"jobStatus": "completed", "isStreaming": false, "content": "ok",
-			}}})
-		default:
-			http.NotFound(w, r)
-		}
+		upstreamCalls.Add(1)
+		http.NotFound(w, r)
 	}))
 	defer upstream.Close()
 
-	server, err := NewEmbedded(t.TempDir(), Options{Upstream: upstream.URL, PollInterval: time.Millisecond})
+	server, err := NewEmbedded(t.TempDir(), Options{Upstream: upstream.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := map[string]any{
-		"model":  "hark",
-		"stream": false,
-		"messages": []any{
-			map[string]string{"role": "system", "content": "You are Codex, a coding agent."},
-			map[string]string{"role": "user", "content": "# AGENTS.md instructions\n<INSTRUCTIONS>Use Codex.</INSTRUCTIONS>"},
-			map[string]string{"role": "user", "content": "# Files mentioned by the user:\n\n## 代发记录.xls: C:/Users/XIA/Desktop/代发记录.xls\n\n## My request:\n能读取到吗？"},
-		},
-		"tools": []any{map[string]any{"type": "function", "function": map[string]any{
-			"name": "exec_command", "description": "The client runs a command on the user's computer.", "parameters": map[string]string{"type": "object"},
-		}}},
-	}
-	raw, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "http://hark.internal/v1/chat/completions", strings.NewReader(string(raw)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer fixture-cookie")
-	req = req.WithContext(WithEmbeddedAccount(context.Background(), SourceAccount{ID: "fixture", Cookie: "fixture-cookie"}))
-	rec := httptest.NewRecorder()
-	server.EmbeddedHandler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var message string
-	_ = json.Unmarshal(sent["message"], &message)
-	if !strings.Contains(message, "文件路径: C:/Users/XIA/Desktop/代发记录.xls") || !strings.Contains(message, "能读取到吗？") {
-		t.Fatalf("local path or request missing: %q", message)
-	}
-	if len(message) > 1000 {
-		t.Fatalf("outbound message still carries a tool block: %d bytes", len(message))
-	}
-	for _, unwanted := range []string{"# Files mentioned", "TOOLS", "<tool_call>", "### exec_command", "client", "user's computer"} {
-		if strings.Contains(message, unwanted) {
-			t.Errorf("outbound message leaked %q: %s", unwanted, message)
+	for _, stream := range []bool{false, true} {
+		body := map[string]any{
+			"model": "hark", "stream": stream,
+			"input": "# Files mentioned by the user:\n\n## fixture.xls: C:/workspace/fixture.xls\n\n## My request:\n能读取到吗？",
+		}
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(raw)))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(WithEmbeddedAccount(context.Background(), SourceAccount{ID: "fixture", Cookie: "fixture-cookie"}))
+		rec := httptest.NewRecorder()
+		server.EmbeddedHandler().ServeHTTP(rec, req)
+		text := rec.Body.String()
+		if rec.Code != http.StatusBadRequest || !strings.Contains(text, "missing_file_content") ||
+			!strings.Contains(text, "未收到附件内容") || strings.Contains(strings.ToLower(text), "hark") ||
+			strings.Contains(text, "C:/workspace") || upstreamCalls.Load() != 0 {
+			t.Errorf("stream=%t HTTP %d, upstream calls=%d, response=%q", stream, rec.Code, upstreamCalls.Load(), text)
 		}
 	}
 }

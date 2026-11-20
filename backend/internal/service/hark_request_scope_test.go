@@ -20,12 +20,15 @@ import (
 func TestHarkRequestScopeFailureDoesNotRotateAccounts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
-		for _, code := range []string{"session_label_history_mismatch", "compaction_tool_choice_conflict"} {
+		for _, code := range []string{"session_label_history_mismatch", "compaction_tool_choice_conflict", "missing_file_content", "unsupported_file_type"} {
 			for _, wrapped := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/wrapped=%t", path, code, wrapped), func(t *testing.T) {
 					status := http.StatusConflict
-					if code == "compaction_tool_choice_conflict" {
+					switch code {
+					case "compaction_tool_choice_conflict", "missing_file_content":
 						status = http.StatusBadRequest
+					case "unsupported_file_type":
+						status = http.StatusUnsupportedMediaType
 					}
 					if wrapped {
 						status = http.StatusServiceUnavailable

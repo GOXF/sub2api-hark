@@ -37,14 +37,15 @@ func isHarkAcceptedTurnFailure(body []byte) bool {
 }
 
 // These request-scoped failures happen before submission. Another credential
-// cannot repair retained history or contradictory summary/tool requirements.
+// cannot repair retained history, invalid tool requirements, or an attachment input.
 func isHarkRequestContextFailure(body []byte) bool {
 	for _, path := range []string{"error.code", "response.error.code"} {
 		if strings.HasPrefix(gjson.GetBytes(body, path).String(), "recovery_") {
 			return true
 		}
 		switch gjson.GetBytes(body, path).String() {
-		case "session_label_history_mismatch", "compaction_tool_choice_conflict", "session_turn_pending", "session_account_conflict", "session_owner_mismatch":
+		case "session_label_history_mismatch", "compaction_tool_choice_conflict", "session_turn_pending", "session_account_conflict", "session_owner_mismatch",
+			"missing_file_content", "unsupported_file_type":
 			return true
 		}
 	}
@@ -63,6 +64,10 @@ func harkStreamFailure(body []byte) (int, error) {
 	}
 	status := http.StatusConflict
 	switch code {
+	case "missing_file_content":
+		status = http.StatusBadRequest
+	case "unsupported_file_type":
+		status = http.StatusUnsupportedMediaType
 	case "session_owner_mismatch":
 		status = http.StatusForbidden
 	case "recovery_store_failed":
