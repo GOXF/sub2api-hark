@@ -940,8 +940,17 @@ const harkResetText = computed(() => {
   const fmt = (iso?: string | null) => {
     if (!iso) return ''
     const d = new Date(iso)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    if (Number.isNaN(d.getTime())) return ''
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d)
+    const get = (type: string) => parts.find((p) => p.type === type)?.value || ''
+    return `${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`
   }
   const reset = fmt(hark.pool?.resets_at) || fmt(hark.daily?.resets_at)
   return reset ? t('admin.accounts.usageWindow.harkPoolReset', { time: reset }) : ''

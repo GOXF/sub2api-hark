@@ -1711,9 +1711,9 @@ export default {
         noData: 'No usage data available for this account'
       },
       usageWindow: {
-        harkDaily: 'Daily remaining',
-        harkPool: 'Period remaining',
-        harkRemaining: 'Daily left {daily} · Period left {pool}',
+        harkDaily: 'Daily',
+        harkPool: 'Period',
+        harkRemaining: 'Daily {daily} · Period {pool}',
         harkUsageHint: 'Bars show remaining quota; 0 means exhausted. Numbers are remaining/limit; the right side is time to reset.',
         harkPoolReset: 'Period reset {time}',
         statsTitle: '5-Hour Window Usage Statistics',
