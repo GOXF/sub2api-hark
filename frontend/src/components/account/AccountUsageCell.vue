@@ -502,18 +502,20 @@
         <UsageProgressBar
           v-if="usageInfo.hark_usage.daily"
           :label="t('admin.accounts.usageWindow.harkDaily')"
-          :utilization="usageInfo.hark_usage.daily.utilization"
+          :utilization="harkRemainingPercent(usageInfo.hark_usage.daily)"
           :resets-at="usageInfo.hark_usage.daily.resets_at"
           color="indigo"
+          remaining-capacity
         />
         <UsageProgressBar
           v-if="usageInfo.hark_usage.pool"
           :label="t('admin.accounts.usageWindow.harkPool')"
-          :utilization="usageInfo.hark_usage.pool.utilization"
+          :utilization="harkRemainingPercent(usageInfo.hark_usage.pool)"
           :resets-at="usageInfo.hark_usage.pool.resets_at"
           color="emerald"
+          remaining-capacity
         />
-        <div v-if="harkUsageText" class="text-[10px] text-gray-500 dark:text-gray-400" :title="harkUsageText">
+        <div v-if="harkUsageText" class="text-[10px] text-gray-500 dark:text-gray-400" :title="harkUsageHint">
           {{ harkUsageText }}
         </div>
       </div>
@@ -912,14 +914,22 @@ const shouldFetchUsage = computed(() => {
   return false
 })
 
+const harkRemainingPercent = (m?: { utilization?: number } | null) =>
+  Math.min(Math.max(100 - (m?.utilization ?? 0), 0), 100)
+
 const harkUsageText = computed(() => {
   const hark = usageInfo.value?.hark_usage
   if (!hark) return ''
-  const meter = (m?: { used: number; limit: number } | null) =>
-    m ? `${formatCompactNumber(m.used)}/${formatCompactNumber(m.limit)}` : '-'
-  const text = t('admin.accounts.usageWindow.harkUsed', { daily: meter(hark.daily), pool: meter(hark.pool) })
+  const remaining = (m?: { used: number; limit: number } | null) =>
+    m ? `${formatCompactNumber(Math.max(m.limit - m.used, 0))} / ${formatCompactNumber(m.limit)}` : '-'
+  const text = t('admin.accounts.usageWindow.harkRemaining', {
+    daily: remaining(hark.daily),
+    pool: remaining(hark.pool),
+  })
   return hark.plan ? `${text} · ${hark.plan}` : text
 })
+
+const harkUsageHint = computed(() => t('admin.accounts.usageWindow.harkUsageHint'))
 
 // CN 供应商子单元格可见性（与 CNProviderQuotaCell / CNProviderBalanceCell 共用
 // credentialsBuilder 的单一实现）：都不可见时显示 `-` 占位符。
