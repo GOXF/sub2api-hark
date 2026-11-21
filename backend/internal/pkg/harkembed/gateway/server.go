@@ -111,6 +111,11 @@ type Server struct {
 	reqMu       sync.Mutex
 	reqLogs     []RequestLog
 	reqInFlight int
+
+	attachmentMu         sync.Mutex
+	attachmentReads      map[string]*attachmentRead
+	attachmentSigningKey []byte
+	attachmentBytes      int64
 }
 
 // Options are runtime settings from flags/environment (see main.go).
@@ -348,6 +353,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/models", s.models)
 	m.HandleFunc("POST /v1/chat/completions", s.trackRequest(s.chat))
 	m.HandleFunc("POST /v1/responses", s.trackRequest(s.responses))
+	m.Handle("PUT /v1/attachment-reads/{id}", s.AttachmentUploadHandler())
 	m.HandleFunc("POST /v1/messages", s.trackRequest(s.messages))
 	m.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	m.HandleFunc("POST /v1/sessions/{id}/end", s.endSession)
