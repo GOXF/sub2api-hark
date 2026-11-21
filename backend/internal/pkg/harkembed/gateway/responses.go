@@ -150,10 +150,17 @@ func (s *Server) normalizeResponses(b []byte) (chatRequest, error) {
 }
 
 type responsesFormat struct {
-	id, messageID string
-	created       int64
-	msgOpen       bool // 流式：message 项已经开始
+	id, messageID   string
+	created         int64
+	msgOpen         bool // 流式：message 项已经开始
+	messageIndex    int
+	streamItems     []any
+	lastActivity    string
+	pendingActivity []string
 }
+
+// PublicActivityItemPrefix identifies non-billable public status metadata.
+const PublicActivityItemPrefix = "rs_activity_"
 
 func newResponsesFormat() *responsesFormat {
 	return &responsesFormat{id: randomID("resp_"), messageID: randomID("msg_"), created: time.Now().Unix()}
@@ -184,12 +191,14 @@ func toolItem(c toolCall) map[string]any {
 }
 
 func (f *responsesFormat) outputItems(status, text string, calls []toolCall) []any {
-	items := []any{}
+	items := append([]any{}, f.streamItems...)
 	itemStatus := "in_progress"
 	if status == "completed" {
 		itemStatus = "completed"
 	}
-	if text != "" || len(calls) == 0 {
+	if f.msgOpen {
+		items[f.messageIndex] = f.messageItem(itemStatus, text)
+	} else if text != "" || len(calls) == 0 {
 		items = append(items, f.messageItem(itemStatus, text))
 	}
 	for _, c := range calls {
@@ -215,14 +224,48 @@ func (f *responsesFormat) start(emit func(string, any)) {
 	emit("response.created", map[string]any{"type": "response.created", "response": f.envelope("in_progress", "", nil)})
 	emit("response.in_progress", map[string]any{"type": "response.in_progress", "response": f.envelope("in_progress", "", nil)})
 }
+
+// Only turn-bound public narration enters this channel, never private reasoning or tool receipts.
+func (f *responsesFormat) activity(emit func(string, any), status turnStatus) {
+	line := statusLine(status.Line)
+	// Bound retained metadata; dropping later activity never changes the answer or terminal state.
+	if status.Status != "processing" || line == "" || line == f.lastActivity || len(f.streamItems)+len(f.pendingActivity) >= 32 {
+		return
+	}
+	f.lastActivity = line
+	// Codex tracks one active item; defer late status instead of interrupting answer deltas.
+	if f.msgOpen {
+		f.pendingActivity = append(f.pendingActivity, line)
+		return
+	}
+	f.emitActivity(emit, line)
+}
+
+func (f *responsesFormat) emitActivity(emit func(string, any), line string) {
+	id, index := randomID(PublicActivityItemPrefix), len(f.streamItems)
+	part := map[string]any{"type": "summary_text", "text": line}
+	item := map[string]any{"id": id, "type": "reasoning", "summary": []any{part}}
+	f.streamItems = append(f.streamItems, item)
+	emit("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": index,
+		"item": map[string]any{"id": id, "type": "reasoning", "summary": []any{}}})
+	emit("response.reasoning_summary_part.added", map[string]any{"type": "response.reasoning_summary_part.added", "item_id": id, "output_index": index, "summary_index": 0,
+		"part": map[string]any{"type": "summary_text", "text": ""}})
+	emit("response.reasoning_summary_text.delta", map[string]any{"type": "response.reasoning_summary_text.delta", "item_id": id, "output_index": index, "summary_index": 0, "delta": line})
+	emit("response.reasoning_summary_text.done", map[string]any{"type": "response.reasoning_summary_text.done", "item_id": id, "output_index": index, "summary_index": 0, "text": line})
+	emit("response.reasoning_summary_part.done", map[string]any{"type": "response.reasoning_summary_part.done", "item_id": id, "output_index": index, "summary_index": 0, "part": part})
+	emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": index, "item": item})
+}
+
 func (f *responsesFormat) openMessage(emit func(string, any)) {
 	if f.msgOpen {
 		return
 	}
 	f.msgOpen = true
-	emit("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 0,
+	f.messageIndex = len(f.streamItems)
+	f.streamItems = append(f.streamItems, nil)
+	emit("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": f.messageIndex,
 		"item": map[string]any{"id": f.messageID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
-	emit("response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": f.messageID, "output_index": 0, "content_index": 0,
+	emit("response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": f.messageID, "output_index": f.messageIndex, "content_index": 0,
 		"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 }
 func (f *responsesFormat) delta(emit func(string, any), text string) {
@@ -230,18 +273,21 @@ func (f *responsesFormat) delta(emit func(string, any), text string) {
 		return
 	}
 	f.openMessage(emit)
-	emit("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "item_id": f.messageID, "output_index": 0, "content_index": 0, "delta": text})
+	emit("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "item_id": f.messageID, "output_index": f.messageIndex, "content_index": 0, "delta": text})
 }
 func (f *responsesFormat) finish(emit func(string, any), full string, calls []toolCall) {
-	idx := 0
-	if full != "" || len(calls) == 0 {
+	if f.msgOpen || full != "" || len(calls) == 0 {
 		f.openMessage(emit)
-		emit("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": f.messageID, "output_index": 0, "content_index": 0, "text": full})
-		emit("response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": f.messageID, "output_index": 0, "content_index": 0,
+		emit("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": f.messageID, "output_index": f.messageIndex, "content_index": 0, "text": full})
+		emit("response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": f.messageID, "output_index": f.messageIndex, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": full, "annotations": []any{}}})
-		emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 0, "item": f.messageItem("completed", full)})
-		idx = 1
+		emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": f.messageIndex, "item": f.messageItem("completed", full)})
 	}
+	for _, line := range f.pendingActivity {
+		f.emitActivity(emit, line)
+	}
+	f.pendingActivity = nil
+	idx := len(f.streamItems)
 	for i, c := range calls {
 		item := toolItem(c)
 		added := map[string]any{}

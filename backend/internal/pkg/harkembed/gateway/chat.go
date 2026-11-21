@@ -583,15 +583,24 @@ func (s *Server) serveTurn(w http.ResponseWriter, r *http.Request, v chatRequest
 			}
 		},
 	}
-	if v.StatusEvents || r.Header.Get("X-Hark-Status") == "true" {
+	customStatus := v.StatusEvents || r.Header.Get("X-Hark-Status") == "true"
+	activity, standardStatus := format.(interface {
+		activity(func(string, any), turnStatus)
+	})
+	if customStatus || standardStatus {
 		hooks.status = func(status turnStatus) {
 			mu.Lock()
 			defer mu.Unlock()
 			if !started || r.Context().Err() != nil {
 				return
 			}
-			latestStatus = status
-			emit("hark.status", status)
+			if customStatus {
+				latestStatus = status
+				emit("hark.status", status)
+			}
+			if standardStatus {
+				activity.activity(emit, status)
+			}
 		}
 	}
 	err := s.runTurn(ctx, r, v, res, hooks)
