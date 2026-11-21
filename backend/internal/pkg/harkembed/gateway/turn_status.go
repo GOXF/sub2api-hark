@@ -30,6 +30,7 @@ type statusNarration struct {
 	Line      string `json:"line"`
 	LineKey   string `json:"lineKey"`
 	Live      bool   `json:"live"`
+	Visible   *bool  `json:"visible,omitempty"`
 }
 
 type turnStatusTracker struct {
@@ -93,7 +94,7 @@ func (s *turnStatusTracker) publish(m harkMessage) {
 		state = "waiting_for_user"
 	}
 	line, key := "", ""
-	if state == "processing" && m.Narration != nil {
+	if state == "processing" && m.Narration != nil && (m.Narration.Visible == nil || *m.Narration.Visible) {
 		line, key = statusLine(m.Narration.Line), statusLine(m.Narration.LineKey)
 	}
 	if state == "processing" && m.Streaming != nil && !*m.Streaming {
@@ -191,15 +192,14 @@ func (s *turnStatusTracker) observe(payload []byte) {
 		if raw := snapshot.Requests[s.requestID]; raw != nil {
 			s.request(raw)
 		}
-		for _, m := range s.messages {
-			s.publish(m)
-		}
 		if n := snapshot.Narration; n != nil {
 			if m, ok := s.messages[n.MessageID]; ok {
 				m.Narration = n
 				s.messages[m.ID] = m
-				s.publish(m)
 			}
+		}
+		for _, m := range s.messages {
+			s.publish(m)
 		}
 		return
 	}

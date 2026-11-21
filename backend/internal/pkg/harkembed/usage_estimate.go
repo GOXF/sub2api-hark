@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/harkembed/gateway"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -132,6 +133,10 @@ var skipBlockTypes = map[string]bool{
 	"file": true, "input_audio": true, "redacted_thinking": true,
 }
 
+func publicActivityItem(v gjson.Result) bool {
+	return v.Get("type").String() == "reasoning" && strings.HasPrefix(v.Get("id").String(), gateway.PublicActivityItemPrefix)
+}
+
 // collectText appends the prompt text found in v (strings outside structural
 // keys, skipping binary blocks and data URLs) to b.
 func collectText(b *strings.Builder, v gjson.Result) {
@@ -151,7 +156,7 @@ func collectText(b *strings.Builder, v gjson.Result) {
 			return true
 		})
 	case v.IsObject():
-		if skipBlockTypes[v.Get("type").String()] {
+		if skipBlockTypes[v.Get("type").String()] || publicActivityItem(v) {
 			return
 		}
 		v.ForEach(func(k, item gjson.Result) bool {
@@ -195,7 +200,12 @@ func estimateInputTokens(format usageFormat, body []byte) int {
 		in := gjson.GetBytes(body, "input")
 		collectText(&b, in)
 		if in.IsArray() {
-			items = len(in.Array())
+			in.ForEach(func(_, item gjson.Result) bool {
+				if !publicActivityItem(item) {
+					items++
+				}
+				return true
+			})
 		} else if in.Exists() {
 			items = 1
 		}
@@ -312,6 +322,9 @@ func responsesOutputText(resp gjson.Result) string {
 		_, _ = b.WriteString(s)
 	}
 	resp.Get("output").ForEach(func(_, item gjson.Result) bool {
+		if publicActivityItem(item) {
+			return true
+		}
 		switch item.Get("type").String() {
 		case "message":
 			item.Get("content").ForEach(func(_, c gjson.Result) bool {
@@ -511,8 +524,13 @@ func (e *usageEstimator) chatUsageChunk() []byte {
 
 func (e *usageEstimator) responsesEvent(orig, body []byte, ev gjson.Result) []byte {
 	switch ev.Get("type").String() {
+	case "response.reasoning_summary_text.delta":
+		if !strings.HasPrefix(ev.Get("item_id").String(), gateway.PublicActivityItemPrefix) {
+			e.addOut(ev.Get("delta").String())
+		}
+		return orig
 	case "response.output_text.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta",
-		"response.refusal.delta", "response.reasoning_summary_text.delta":
+		"response.refusal.delta":
 		e.addOut(ev.Get("delta").String())
 		return orig
 	case "response.completed", "response.incomplete":

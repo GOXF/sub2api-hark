@@ -21,7 +21,7 @@ type statusTestRecorder struct {
 }
 
 func (w *statusTestRecorder) Write(b []byte) (int, error) {
-	if bytes.Contains(b, []byte("hark.status")) {
+	if bytes.Contains(b, []byte("hark.status")) || bytes.Contains(b, []byte("response.reasoning_summary_text.delta")) {
 		w.once.Do(func() { close(w.gate) })
 	}
 	return w.ResponseRecorder.Write(b)
@@ -123,7 +123,7 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 						w.(http.Flusher).Flush()
 						<-r.Context().Done()
 					case "/api/messages/history":
-						if opt && stream && !strings.Contains(kind, "no_sync") {
+						if (opt || protocol == "responses") && stream && !strings.Contains(kind, "no_sync") {
 							select {
 							case <-gate:
 							case <-r.Context().Done():
@@ -280,8 +280,11 @@ func TestTurnStatusStreamingProtocols(t *testing.T) {
 					t.Fatal("private reasoning leaked")
 				}
 				if !opt {
-					if syncCalls.Load() != 0 || strings.Contains(text, "hark.status") {
+					if (protocol != "responses" && syncCalls.Load() != 0) || strings.Contains(text, "hark.status") {
 						t.Fatal("legacy client changed")
+					}
+					if protocol == "responses" && (syncCalls.Load() != 1 || !strings.Contains(text, "response.reasoning_summary_text.delta")) {
+						t.Fatal("standard Responses activity missing without opt-in")
 					}
 					return
 				}

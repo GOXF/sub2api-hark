@@ -1,0 +1,49 @@
+[
+  {
+    "type": "patches",
+    "seq": 1,
+    "data": [
+      {
+        "op": "entry_add",
+        "id": "fixture-assistant",
+        "value": {
+          "id": "fixture-assistant",
+          "role": "assistant",
+          "triggeredByMessageId": "fixture-request",
+          "jobStatus": "running",
+          "isStreaming": true
+        }
+      }
+    ]
+  },
+  {
+    "type": "patches",
+    "seq": 2,
+    "data": [
+      {
+        "op": "narration_update",
+        "value": {
+          "messageId": "fixture-assistant",
+          "line": "正在阅读页面",
+          "lineKey": "narration.web.read_page",
+          "live": true,
+          "visible": true
+        }
+      }
+    ]
+  },
+  {
+    "type": "patches",
+    "seq": 3,
+    "data": [
+      {
+        "op": "message_update",
+        "id": "fixture-assistant",
+        "fields": {
+          "isStreaming": false,
+          "jobStatus": "completed"
+        }
+      }
+    ]
+  }
+]
