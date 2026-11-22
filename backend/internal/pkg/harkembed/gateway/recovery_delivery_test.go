@@ -71,6 +71,7 @@ func newDurableRig(t *testing.T, protocol string, stream bool) *durableRig {
 		case "/api/messages/history":
 			x.gets++
 			if !x.ready {
+				w.Header().Set("Retry-After", "60") // Exceed the live read-retry budget to exercise durable recovery.
 				w.WriteHeader(429)
 				_, _ = w.Write([]byte(`{"error":"fixture polling interrupted"}`))
 				return
