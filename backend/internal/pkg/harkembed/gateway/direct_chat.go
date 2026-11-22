@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +22,33 @@ type upstreamError struct {
 }
 
 func (e *upstreamError) Error() string { return e.message }
+
+const historyPollRetryBudget = 30 * time.Second
+
+type historyRateLimitError struct {
+	*upstreamError
+	after time.Duration
+}
+
+func (e *historyRateLimitError) Unwrap() error { return e.upstreamError }
+
+func historyRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	seconds, err := strconv.ParseUint(value, 10, 64)
+	if err == nil {
+		if seconds > uint64(historyPollRetryBudget/time.Second) {
+			return historyPollRetryBudget + time.Second
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if errors.Is(err, strconv.ErrRange) {
+		return historyPollRetryBudget + time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		return max(time.Until(at), 0)
+	}
+	return 0
+}
 
 // isAuthError reports a credential problem (HTTP 401/403 other than an
 // explicit feature rejection). Only these trigger account failover.
@@ -119,12 +147,16 @@ func (s *Server) harkJSONLimit(ctx context.Context, method, path, cookie string,
 		case 403:
 			code, message = "upstream_access_blocked", "Hark 返回 HTTP 403，访问受阻（"+upstreamDiag(method, path, resp, body, s.routeDiag(cookie))+"）"
 		case 429:
-			status, code, message = 429, "upstream_rate_limited", "Hark 请求限流或额度不足，请稍后再试"
+			status, code, message = 429, "upstream_rate_limited", "Hark 请求暂时限流，请稍后再试"
 		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			code, message = "upstream_session_expired", "Hark 重定向了 API 请求，Cookie 可能已失效"
 		}
-		return &upstreamError{status, code, message}
+		failure := &upstreamError{status, code, message}
+		if resp.StatusCode == 429 && method == http.MethodGet && strings.HasPrefix(path, "/api/messages/history?") {
+			return &historyRateLimitError{failure, historyRetryAfter(resp.Header.Get("Retry-After"))}
+		}
+		return failure
 	}
 	if output == nil {
 		return nil
@@ -647,11 +679,35 @@ func (s *Server) sendProjectPayload(ctx context.Context, cookie, cid string, pay
 		go func() { defer close(statusDone); s.watchTurnStatus(statusCtx, cookie, cid, statusTracker) }()
 		defer func() { stopStatus(); <-statusDone }()
 	}
+	retries, retryDelay, retryWait := 0, time.Second, time.Duration(0)
 	for {
-		messages, err := s.fetchHistory(ctx, cookie, cid)
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return projectReply{}, err
 		}
+		messages, err := s.fetchHistory(ctx, cookie, cid)
+		if err != nil {
+			// Only repeat accepted-turn history GETs, never the native submission.
+			var limited *historyRateLimitError
+			if !errors.As(err, &limited) || retries >= 4 {
+				return projectReply{}, err
+			}
+			delay := max(retryDelay, limited.after)
+			if delay > historyPollRetryBudget-retryWait {
+				return projectReply{}, err
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return projectReply{}, ctx.Err()
+			case <-timer.C:
+			}
+			retries++
+			retryWait += delay
+			retryDelay = min(2*retryDelay, 8*time.Second)
+			continue
+		}
+		retryDelay = time.Second
 		if statusTracker != nil {
 			statusTracker.history(messages)
 		}
