@@ -37,6 +37,12 @@ func TestAttachmentNativeCodex(t *testing.T) {
 	if err = os.MkdirAll(evidence, 0700); err != nil {
 		t.Fatal(err)
 	}
+	check := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Error(err)
+		}
+	}
 	var mu sync.Mutex
 	var data []byte
 	var sent map[string]json.RawMessage
@@ -46,25 +52,30 @@ func TestAttachmentNativeCodex(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/conversations":
-			io.WriteString(w, `{"conversationId":"native-fixture"}`)
+			_, err := io.WriteString(w, `{"conversationId":"native-fixture"}`)
+			check(err)
 		case "/api/files/upload/native-fixture/presign":
-			json.NewEncoder(w).Encode(map[string]string{"upload_url": "http://" + r.Host + "/upload", "attachment_id": "native-file", "path": "native-path", "s3_key": "native-key"})
+			check(json.NewEncoder(w).Encode(map[string]string{"upload_url": "http://" + r.Host + "/upload", "attachment_id": "native-file", "path": "native-path", "s3_key": "native-key"}))
 		case "/upload":
-			data, _ = io.ReadAll(r.Body)
-			io.WriteString(w, `{}`)
+			var err error
+			data, err = io.ReadAll(r.Body)
+			check(err)
+			_, err = io.WriteString(w, `{}`)
+			check(err)
 		case "/api/files/native-fixture/native-file/finalize":
-			io.WriteString(w, `{}`)
+			_, err := io.WriteString(w, `{}`)
+			check(err)
 		case "/api/messages/send":
-			json.NewDecoder(r.Body).Decode(&sent)
+			check(json.NewDecoder(r.Body).Decode(&sent))
 			var id string
-			json.Unmarshal(sent["idempotencyKey"], &id)
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "native-fixture", "messageId": id, "redirected": false})
+			check(json.Unmarshal(sent["idempotencyKey"], &id))
+			check(json.NewEncoder(w).Encode(map[string]any{"success": true, "conversationId": "native-fixture", "messageId": id, "redirected": false}))
 		case "/api/messages/history":
 			var id, responseID string
-			json.Unmarshal(sent["idempotencyKey"], &id)
-			json.Unmarshal(sent["responseMessageId"], &responseID)
+			check(json.Unmarshal(sent["idempotencyKey"], &id))
+			check(json.Unmarshal(sent["responseMessageId"], &responseID))
 			marker := regexp.MustCompile(`ATTACHMENT_HIDDEN_[a-zA-Z0-9]+`).Find(data)
-			json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{"id": responseID, "role": "assistant", "triggeredByMessageId": id, "jobStatus": "completed", "isStreaming": false, "content": string(marker)}}})
+			check(json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{"id": responseID, "role": "assistant", "triggeredByMessageId": id, "jobStatus": "completed", "isStreaming": false, "content": string(marker)}}}))
 		default:
 			http.NotFound(w, r)
 		}
@@ -74,7 +85,7 @@ func TestAttachmentNativeCodex(t *testing.T) {
 	live := os.Getenv("HARK_ATTACHMENT_ACCOUNT_HELPER") != ""
 	if live {
 		// Read credentials through a private process pipe; never write or log them.
-		secret, err := exec.Command("python", "-X", "utf8", os.Getenv("HARK_ATTACHMENT_ACCOUNT_HELPER")).Output()
+		secret, err := exec.Command("python", "-X", "utf8", os.Getenv("HARK_ATTACHMENT_ACCOUNT_HELPER")).Output() //nolint:gosec // G702: opt-in maintainer-owned test helper, not request input; direct argv, no shell.
 		if err != nil {
 			t.Fatal("private live account helper failed")
 		}
@@ -108,7 +119,8 @@ func TestAttachmentNativeCodex(t *testing.T) {
 	var endpoint string
 	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "PUT" {
-			b, _ := io.ReadAll(io.LimitReader(r.Body, 21<<20))
+			b, err := io.ReadAll(io.LimitReader(r.Body, 21<<20))
+			check(err)
 			r.Body = io.NopCloser(bytes.NewReader(b))
 			mu.Lock()
 			callback = append([]byte(nil), b...)
@@ -122,17 +134,19 @@ func TestAttachmentNativeCodex(t *testing.T) {
 				w.Header()[k] = values
 			}
 			w.WriteHeader(rec.Code)
-			w.Write(rec.Body.Bytes())
+			_, err = w.Write(rec.Body.Bytes())
+			check(err)
 			return
 		}
 		if r.Method != "POST" || r.URL.Path != "/v1/responses" {
 			http.NotFound(w, r)
 			return
 		}
-		b, _ := io.ReadAll(io.LimitReader(r.Body, 83<<20))
+		b, err := io.ReadAll(io.LimitReader(r.Body, 83<<20))
+		check(err)
 		r.Body = io.NopCloser(bytes.NewReader(b))
 		var body any
-		json.Unmarshal(b, &body)
+		check(json.Unmarshal(b, &body))
 		mu.Lock()
 		records = append(records, map[string]any{"path": r.URL.Path, "body": body})
 		mu.Unlock()
@@ -147,7 +161,7 @@ func TestAttachmentNativeCodex(t *testing.T) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { check(resp.Body.Close()) }()
 		mu.Lock()
 		records[len(records)-1]["response_headers"] = resp.Header.Clone()
 		mu.Unlock()
@@ -160,21 +174,22 @@ func TestAttachmentNativeCodex(t *testing.T) {
 		if fl, ok := w.(http.Flusher); ok {
 			fl.Flush()
 		}
-		io.Copy(w, resp.Body)
+		_, err = io.Copy(w, resp.Body)
+		check(err)
 	}))
 	defer loopback.Close()
 	endpoint = loopback.URL
 	_, source, _, _ := runtime.Caller(0)
 	driver := filepath.Join(filepath.Dir(source), "gateway", "testdata", "attachment_native_client.py")
-	cmd := exec.Command("python", "-X", "utf8", driver, endpoint, fixture, evidence)
+	cmd := exec.Command("python", "-X", "utf8", driver, endpoint, fixture, evidence) //nolint:gosec // G702: fixed repository test driver and explicit opt-in fixture paths; direct argv, no shell.
 	output, err := cmd.CombinedOutput()
-	os.WriteFile(filepath.Join(evidence, "native-driver.stdout-stderr.txt"), output, 0600)
+	check(os.WriteFile(filepath.Join(evidence, "native-driver.stdout-stderr.txt"), output, 0600))
 	mu.Lock()
 	b, _ := json.MarshalIndent(records, "", "  ")
 	got := append([]byte(nil), callback...)
 	storage := append([]byte(nil), data...)
 	mu.Unlock()
-	os.WriteFile(filepath.Join(evidence, "gateway-requests.json"), b, 0600)
+	check(os.WriteFile(filepath.Join(evidence, "gateway-requests.json"), b, 0600))
 	if err != nil {
 		t.Fatalf("native client: %v: %s", err, output)
 	}
@@ -206,6 +221,6 @@ func TestAttachmentNativeCodex(t *testing.T) {
 	}
 	result := map[string]any{"native_client": "unchanged installed Codex", "gateway": "actual product host preflight, Do, upload and usage wrappers", "upstream": upstreamProof, "bytes": len(got), "sha256": hex.EncodeToString(sum[:]), "requests": len(records), "hidden_marker_returned": true}
 	b, _ = json.MarshalIndent(result, "", "  ")
-	os.WriteFile(filepath.Join(evidence, "RESULT.json"), b, 0600)
+	check(os.WriteFile(filepath.Join(evidence, "RESULT.json"), b, 0600))
 	t.Log(string(b))
 }
