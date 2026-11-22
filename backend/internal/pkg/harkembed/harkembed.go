@@ -148,6 +148,9 @@ func Do(req *http.Request, proxyURL string, accountID int64) (*http.Response, er
 	var usageBody []byte
 	if usageEstimateEnabled(in) && labelFormatOf(in.URL.Path) != labelNone {
 		usageBody = requestBodyBytes(in)
+		if body, ok := in.Context().Value(attachmentBillingBodyKey{}).([]byte); ok {
+			usageBody = body
+		}
 	}
 	if err := injectModelLabel(in); err != nil {
 		return nil, fmt.Errorf("hark gateway: read request body: %w", err)

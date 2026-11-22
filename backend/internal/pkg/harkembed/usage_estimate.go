@@ -680,6 +680,9 @@ func (j *jsonBody) Close() error { return j.src.Close() }
 // body as the client sent it, after the model rewrite) so that zero usage is
 // replaced by an estimate.
 func withUsageEstimate(req *http.Request, body []byte, resp *http.Response) *http.Response {
+	if resp != nil && resp.Header.Get(gateway.AttachmentIntakeHeader) != "" {
+		return resp
+	}
 	if resp == nil || resp.Body == nil || resp.StatusCode != http.StatusOK || req == nil || req.URL == nil ||
 		req.Method != http.MethodPost || !usageEstimateEnabled(req) {
 		return resp

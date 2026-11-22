@@ -336,6 +336,11 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeResponses(w, r, &v) {
 		return
 	}
+	handled, release := s.prepareAttachmentRead(w, r, &v)
+	defer release()
+	if handled {
+		return
+	}
 	s.serveTurn(w, r, v, newResponsesFormat())
 }
 
